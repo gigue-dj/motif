@@ -5,6 +5,15 @@ scope of the alpha milestones. It is the single source of truth for the
 "what and why" of the fork from Kuzu. If something here disagrees with code,
 the doc is wrong — open an issue.
 
+> **Repo layout note (post alpha.1).** The C++ Kuzu fork that constituted
+> alpha.1 has been moved to `cpp-reference/` and is frozen. It serves as a
+> behavioural spec for the Rust port that begins in alpha.2. The `Locked-in
+> decisions` table and the milestone structure below were written against
+> the C++ baseline; both are scheduled for a substantive update in the
+> alpha.2 commit to capture the Rust pivot decisions
+> (`wasm32-unknown-unknown`, sync core, hand-rolled parser, dual MIT/Apache
+> license, hostile-device assumptions, TOML config, etc.).
+
 ## What Motif is
 
 Motif is a **follower** graph store. A small embedded engine, derived from
