@@ -1,23 +1,16 @@
-# Helper frontend to cmake.
+# Motif - helper frontend to cmake.
 # Tip: to see the actual commands that will be run for any target, use `make -n <target>`.
+#
+# v0.0.1 supports only the wasm target. Native release/debug targets are kept
+# for development convenience but are not the shipping artifact.
 
-.DEFAULT_GOAL := release
-# Explicit targets to avoid conflict with files of the same name.
+.DEFAULT_GOAL := wasm
 .PHONY: \
-	release relwithdebinfo debug all allconfig alldebug \
-	test-build test lcov \
-	java_native_header java javatest \
-	nodejs nodejstest \
-	python python-debug pytest pytest-debug \
+	release relwithdebinfo debug \
 	wasm wasmtest \
-	rusttest \
-	benchmark example \
-	extension-test-build extension-test extension-json-test-build extension-json-test \
-	extension-debug extension-release \
-	shell-test \
-	tidy tidy-analyzer clangd-diagnostics \
-	install \
-	clean-extension clean-python-api clean-java clean
+	test-build test \
+	tidy clangd-diagnostics \
+	install clean
 .ONESHELL:
 .SHELLFLAGS = -ec
 
@@ -27,8 +20,6 @@ EXTRA_CMAKE_FLAGS ?=
 CLANGD_DIAGNOSTIC_INSTANCES ?= 4
 PREFIX ?= install
 TEST_JOBS ?= 10
-EXTENSION_LIST ?= httpfs;duckdb;json;postgres;sqlite;fts;delta;iceberg;azure;unity_catalog;vector;neo4j;algo;llm
-EXTENSION_TEST_EXCLUDE_FILTER ?= ""
 
 ifeq ($(shell uname -s 2>/dev/null),Linux)
 	NUM_THREADS ?= $(shell expr $(shell nproc) \* 2 / 3)
@@ -58,10 +49,6 @@ endif
 ifdef UBSAN
 	CMAKE_FLAGS += -DENABLE_UBSAN=$(UBSAN)
 endif
-
-ifdef ENABLE_DESER_DEBUG
-	CMAKE_FLAGS += -DENABLE_DESER_DEBUG=$(ENABLE_DESER_DEBUG)
-endif
 ifdef RUNTIME_CHECKS
 	CMAKE_FLAGS += -DENABLE_RUNTIME_CHECKS=$(RUNTIME_CHECKS)
 endif
@@ -71,50 +58,21 @@ endif
 ifdef LTO
 	CMAKE_FLAGS += -DENABLE_LTO=$(LTO)
 endif
-
 ifdef SKIP_SINGLE_FILE_HEADER
 	CMAKE_FLAGS += -DBUILD_SINGLE_FILE_HEADER=FALSE
 endif
-
-ifdef PAGE_SIZE_LOG2
-	CMAKE_FLAGS += -DKUZU_PAGE_SIZE_LOG2=$(PAGE_SIZE_LOG2)
-endif
-
-ifdef DEFAULT_REL_STORAGE_DIRECTION
-	CMAKE_FLAGS += -DKUZU_DEFAULT_REL_STORAGE_DIRECTION=$(DEFAULT_REL_STORAGE_DIRECTION)
-endif
-
-ifdef VECTOR_CAPACITY_LOG2
-	CMAKE_FLAGS += -DKUZU_VECTOR_CAPACITY_LOG2=$(VECTOR_CAPACITY_LOG2)
-endif
-
-ifdef NODE_GROUP_SIZE_LOG2
-	CMAKE_FLAGS += -DKUZU_NODE_GROUP_SIZE_LOG2=$(NODE_GROUP_SIZE_LOG2)
-endif
-
-ifdef MAX_SEGMENT_SIZE_LOG2
-	CMAKE_FLAGS += -DKUZU_MAX_SEGMENT_SIZE_LOG2=$(MAX_SEGMENT_SIZE_LOG2)
-endif
-
 ifdef SINGLE_THREADED
 	CMAKE_FLAGS += -DSINGLE_THREADED=$(SINGLE_THREADED)
 endif
-
 ifdef WASM_NODEFS
 	CMAKE_FLAGS += -DWASM_NODEFS=$(WASM_NODEFS)
 endif
-
-ifdef USE_STD_FORMAT
-	CMAKE_FLAGS += -DUSE_STD_FORMAT=$(USE_STD_FORMAT)
-endif
-
 ifdef EXTRA_CMAKE_FLAGS
 	CMAKE_FLAGS += $(EXTRA_CMAKE_FLAGS)
 endif
-ifdef BM_MALLOC
-	CMAKE_FLAGS += -DENABLE_MALLOC_BUFFER_MANAGER=$(BM_MALLOC)
-endif
 
+# Native development targets (not shipped — useful for local iteration on the
+# core engine without the wasm/emscripten toolchain).
 release:
 	$(call run-cmake-release,)
 
@@ -124,218 +82,39 @@ relwithdebinfo:
 debug:
 	$(call run-cmake-debug,)
 
-allconfig:
-	$(call config-cmake-release, \
-		-DBUILD_BENCHMARK=TRUE \
-		-DBUILD_EXAMPLES=TRUE \
-		-DBUILD_EXTENSIONS="$(EXTENSION_LIST)" \
-		-DBUILD_JAVA=TRUE \
-		-DBUILD_NODEJS=TRUE \
-		-DBUILD_PYTHON=TRUE \
-		-DBUILD_SHELL=TRUE \
-		-DBUILD_TESTS=TRUE \
-	)
-
-all: allconfig
-	$(call build-cmake-release)
-
-alldebug:
-	$(call run-cmake-debug, \
-		-DBUILD_BENCHMARK=TRUE \
-		-DBUILD_EXAMPLES=TRUE \
-		-DBUILD_EXTENSIONS="$(EXTENSION_LIST)" \
-		-DBUILD_JAVA=TRUE \
-		-DBUILD_NODEJS=TRUE \
-		-DBUILD_PYTHON=TRUE \
-		-DBUILD_SHELL=TRUE \
-		-DBUILD_TESTS=TRUE \
-	)
-
-# Main tests
 test-build:
-	$(call run-cmake-relwithdebinfo, -DBUILD_TESTS=TRUE -DENABLE_BACKTRACES=TRUE)
+	$(call run-cmake-relwithdebinfo, -DBUILD_TESTS=TRUE)
 
 test: test-build
 	ctest --test-dir build/$(call get-build-path,RelWithDebInfo)/test --output-on-failure -j ${TEST_JOBS}
 
-lcov:
-	$(call run-cmake-release, -DBUILD_TESTS=TRUE -DBUILD_LCOV=TRUE)
-	ctest --test-dir build/$(call get-build-path,Release)/test --output-on-failure -j ${TEST_JOBS}
-
-# Language APIs
-
-# Required for clangd-related tools.
-java_native_header:
-	cmake --build build/$(call get-build-path,Release) --target kuzu_java
-
-java:
-	$(call run-cmake-release, -DBUILD_JAVA=TRUE)
-
-javatest:
-ifeq ($(OS),Windows_NT)
-	cd tools/java_api &&\
-	gradlew.bat test -i
-else
-	cd tools/java_api &&\
-	./gradlew test -i
-endif
-
-nodejs:
-	$(call run-cmake-release, -DBUILD_NODEJS=TRUE)
-
-nodejs-deps:
-	cd tools/nodejs_api && npm install --include=dev
-
-nodejstest: nodejs
-	cd tools/nodejs_api && npm test
-
-nodejstest-deps: nodejs-deps nodejstest
-
-python:
-	$(call run-cmake-release, -DBUILD_PYTHON=TRUE -DBUILD_SHELL=FALSE)
-
-python-debug:
-	$(call run-cmake-debug, -DBUILD_PYTHON=TRUE)
-
-pytest: python
-	cmake -E env PYTHONPATH=tools/python_api/build python3 -m pytest -vv tools/python_api/test
-
-pytest-venv: python
-	$(MAKE) -C tools/python_api pytest
-
-pytest-debug: python-debug
-	cmake -E env PYTHONPATH=tools/python_api/build python3 -m pytest -vv tools/python_api/test
-
+# Shipping artifact: wasm.
 wasm:
 	mkdir -p build/wasm && cd build/wasm &&\
-	emcmake cmake $(CMAKE_FLAGS) -DCMAKE_BUILD_TYPE=$(call get-build-type,Release) -DBUILD_WASM=TRUE -DBUILD_BENCHMARK=FALSE -DBUILD_TESTS=FALSE -DBUILD_SHELL=FALSE  ../.. && \
+	emcmake cmake $(CMAKE_FLAGS) -DCMAKE_BUILD_TYPE=$(call get-build-type,Release) -DBUILD_WASM=TRUE -DBUILD_TESTS=FALSE -DBUILD_SHELL=FALSE  ../.. && \
 	cmake --build . --config $(call get-build-type,Release) -j $(NUM_THREADS)
 
 wasmtest:
 	mkdir -p build/wasm && cd build/wasm &&\
-	emcmake cmake $(CMAKE_FLAGS) -DCMAKE_BUILD_TYPE=$(call get-build-type,Release) -DBUILD_WASM=TRUE -DBUILD_BENCHMARK=FALSE -DBUILD_TESTS=TRUE -DBUILD_SHELL=FALSE  ../.. && \
+	emcmake cmake $(CMAKE_FLAGS) -DCMAKE_BUILD_TYPE=$(call get-build-type,Release) -DBUILD_WASM=TRUE -DBUILD_TESTS=TRUE -DBUILD_SHELL=FALSE  ../.. && \
 	cmake --build . --config $(call get-build-type,Release) -j $(NUM_THREADS) &&\
 	cd ../.. && ctest --test-dir  build/wasm/test/ --output-on-failure -j ${TEST_JOBS} --timeout 600
 
-rusttest:
-ifeq ($(OS),Windows_NT)
-	set CARGO_BUILD_JOBS=$(NUM_THREADS)
-else
-	export CARGO_BUILD_JOBS=$(NUM_THREADS)
-endif
-	cd tools/rust_api && cargo test --release --locked --all-features
-
-# Other misc build targets
-benchmark:
-	$(call run-cmake-release, -DBUILD_BENCHMARK=TRUE)
-
-example:
-	$(call run-cmake-release, -DBUILD_EXAMPLES=TRUE)
-
-extension-build:
-	$(call run-cmake-relwithdebinfo,-DBUILD_EXTENSIONS="$(EXTENSION_LIST)")
-
-extension-test-build:
-	$(call run-cmake-relwithdebinfo, \
-		-DBUILD_EXTENSIONS="$(EXTENSION_LIST)" \
-		-DBUILD_EXTENSION_TESTS=TRUE \
-		-DBUILD_TESTS=TRUE \
-	)
-
-extension-test: extension-test-build
-	$(if $(filter Windows_NT,$(OS)),\
-		set "E2E_TEST_FILES_DIRECTORY=extension" &&,\
-		E2E_TEST_FILES_DIRECTORY=extension) \
-    ctest --test-dir build/$(call get-build-path,RelWithDebInfo)/test/runner --output-on-failure -j ${TEST_JOBS} --exclude-regex "${EXTENSION_TEST_EXCLUDE_FILTER}" && \
-    ctest --test-dir build/$(call get-build-path,RelWithDebInfo)/extension --output-on-failure -j ${TEST_JOBS} --exclude-regex "${EXTENSION_TEST_EXCLUDE_FILTER}" && \
-	aws s3 rm s3://kuzu-dataset-us/${RUN_ID}/ --recursive
-
-extension-test-static-build:
-	$(call run-cmake-relwithdebinfo, \
-		-DBUILD_EXTENSIONS="$(EXTENSION_LIST)" \
-		-DBUILD_EXTENSION_TESTS=TRUE \
-		-DEXTENSION_STATIC_LINK_LIST="$(EXTENSION_LIST)" \
-		-DBUILD_TESTS=TRUE \
-	)
-
-extension-static-link-test: extension-test-static-build
-	$(if $(filter Windows_NT,$(OS)),\
-		set "E2E_TEST_FILES_DIRECTORY=extension" &&,\
-		E2E_TEST_FILES_DIRECTORY=extension) \
-    ctest --test-dir build/$(call get-build-path,RelWithDebInfo)/test/runner --output-on-failure -j ${TEST_JOBS} --exclude-regex "${EXTENSION_TEST_EXCLUDE_FILTER}" && \
-    ctest --test-dir build/$(call get-build-path,RelWithDebInfo)/extension --output-on-failure -j ${TEST_JOBS} --exclude-regex "${EXTENSION_TEST_EXCLUDE_FILTER}" && \
-	aws s3 rm s3://kuzu-dataset-us/${RUN_ID}/ --recursive
-
-extension-lcov-build:
-	$(call run-cmake-release, \
-		-DBUILD_EXTENSIONS="$(EXTENSION_LIST)" \
-		-DBUILD_EXTENSION_TESTS=TRUE \
-		-DBUILD_TESTS=TRUE \
-		-DBUILD_LCOV=TRUE \
-	)
-
-extension-lcov: extension-lcov-build
-	$(if $(filter Windows_NT,$(OS)),\
-		set "E2E_TEST_FILES_DIRECTORY=extension" &&,\
-		E2E_TEST_FILES_DIRECTORY=extension) \
-    ctest --test-dir build/$(call get-build-path,Release)/test/runner --output-on-failure -j ${TEST_JOBS} --exclude-regex "${EXTENSION_TEST_EXCLUDE_FILTER}" && \
-    ctest --test-dir build/$(call get-build-path,Release)/extension --output-on-failure -j ${TEST_JOBS} --exclude-regex "${EXTENSION_TEST_EXCLUDE_FILTER}" && \
-	aws s3 rm s3://kuzu-dataset-us/${RUN_ID}/ --recursive
-
-extension-debug:
-	$(call run-cmake-debug, \
-		-DBUILD_EXTENSIONS="$(EXTENSION_LIST)" \
-		-DBUILD_KUZU=FALSE \
-	)
-
-extension-release:
-	$(call run-cmake-release, \
-		-DBUILD_EXTENSIONS="$(EXTENSION_LIST)" \
-		-DBUILD_KUZU=FALSE \
-	)
-
-# pytest expects a `Release` build path.
-shell-test:
-	$(call run-cmake-release, \
-		-DBUILD_SHELL=TRUE \
-	)
-	$(MAKE) -C tools/shell/test test
-
-# Clang-related tools and checks
-
-# Must build the java native header to avoid missing includes. Pipe character
-# `|` ensures these targets build in this order, even in the presence of
-# parallelism.
-tidy: | allconfig java_native_header
+tidy:
+	$(call config-cmake-release,)
 	run-clang-tidy -p build/$(call get-build-path,Release) -quiet -j $(NUM_THREADS) \
-		"^$(realpath src)|$(realpath extension)/(?!fts/third_party/snowball/)|$(realpath tools)/(?!shell/linenoise.cpp)"
+		"^$(realpath src)|$(realpath tools)"
 
-tidy-analyzer: | allconfig java_native_header
-	run-clang-tidy -config-file .clang-tidy-analyzer -p build/$(call get-build-path,Release) -quiet -j $(NUM_THREADS) \
-		"^$(realpath src)/(?!function/vector_cast_functions.cpp)|$(realpath extension)/(?!fts/third_party/snowball/)|$(realpath tools)/(?!shell/linenoise.cpp)"
-
-clangd-diagnostics: | allconfig java_native_header
+clangd-diagnostics:
+	$(call config-cmake-release,)
 	find src -name *.h -or -name *.cpp | xargs \
 		./scripts/get-clangd-diagnostics.py --compile-commands-dir build/$(call get-build-path,Release) \
 		-j $(NUM_THREADS) --instances $(CLANGD_DIAGNOSTIC_INSTANCES)
 
-
-# Installation
 install:
 	cmake --install build/$(call get-build-path,Release) --prefix $(PREFIX)
 
-
-# Cleaning
-clean-extension:
-	cmake -E rm -rf extension/*/build
-
-clean-python-api:
-	cmake -E rm -rf tools/python_api/build
-
-clean-java:
-	cmake -E rm -rf tools/java_api/build
-
-clean: clean-extension clean-python-api clean-java
+clean:
 	cmake -E rm -rf build
 
 
@@ -352,21 +131,9 @@ define build-cmake
 	cmake --build build/$(call get-build-path,$1) --config $(call get-build-type,$1)
 endef
 
-define run-cmake
-	$(call config-cmake,$1,$2)
-	$(call build-cmake,$1)
-endef
-
 define run-cmake-debug
-	$(call run-cmake,Debug,$1)
-endef
-
-define build-cmake-release
-	$(call build-cmake,Release,$1)
-endef
-
-define build-cmake-relwithdebinfo
-	$(call build-cmake,RelWithDebInfo,$1)
+	$(call config-cmake,Debug,$2)
+	$(call build-cmake,Debug)
 endef
 
 define config-cmake-release
@@ -379,10 +146,10 @@ endef
 
 define run-cmake-release
 	$(call config-cmake-release,$1)
-	$(call build-cmake-release,$1)
+	$(call build-cmake,Release)
 endef
 
 define run-cmake-relwithdebinfo
 	$(call config-cmake-relwithdebinfo,$1)
-	$(call build-cmake-relwithdebinfo,$1)
+	$(call build-cmake,RelWithDebInfo)
 endef

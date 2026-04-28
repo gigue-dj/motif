@@ -1,77 +1,35 @@
-> [!NOTE]
-> Kuzu is working on something new!
-> 
-> We are archiving the KuzuDB project here: https://github.com/kuzudb/kuzu/
-> 
-> For those using Kuzu currently, prior Kuzu releases will continue to be usable in the same way without modifications to your code.
-> 
-> If you are also using extensions, moving forward you have two options:
->   1. we have a new release 0.11.3 that bundles many (but not all) of the extensions, so you can migrate to 0.11.3; or
->   2. you can follow the [instructions here](http://kuzudb.github.io/docs/extensions/#host-your-own-extension-server) to run a local extension server.
-> 
-> Further, some of our resources are moving from our website to GitHub:
->   - Docs: http://kuzudb.github.io/docs
->   - Blog: http://kuzudb.github.io/blog
-> 
-> We thank you for being early users of Kuzu and making Kuzu better over the last few years!
+# Motif
 
+**Motif** is a tiny, mobile-first follower graph store. It is a fork of [Kuzu](https://github.com/kuzudb/kuzu/), stripped down for embedded use on phones and small edge devices, with integrity outsourced to an upstream controller database.
 
-# Kuzu
-Kuzu is an embedded graph database built for query speed and scalability. Kuzu is optimized for handling complex analytical workloads 
-on very large databases and provides a set of retrieval features, such as a full text search and vector indices. Our core feature set includes:
+> **Status:** v0.0.1-alpha — pre-functional. The codebase is the upstream Kuzu engine with extensions, language bindings, and benchmarks pruned. Sync layer is a stub. Not usable yet. See [`MOTIF.md`](./MOTIF.md) for the v0.0.1 plan and architectural decisions.
 
-- Flexible Property Graph Data Model and Cypher query language
-- Embeddable, serverless integration into applications
-- Native full text search and vector index
-- Columnar disk-based storage
-- Columnar sparse row-based (CSR) adjacency list/join indices
-- Vectorized and factorized query processor
-- Novel and very fast join algorithms
-- Multi-core query parallelism
-- Serializable ACID transactions
-- Wasm (WebAssembly) bindings for fast, secure execution in the browser
+## Architecture in one paragraph
 
-Kuzu was initially developed by Kùzu Inc. It is available under a permissible license.
+A host application (mobile app or edge agent) embeds Motif as a WASM module. Motif holds a small local property graph for query speed and offline operation. Every committed mutation is teed to a `ControllerClient` queue; the controller (SurrealDB today, a custom Nebula-class controller later) is the source of truth for schema, integrity, and conflict resolution. The controller is **server-wins**: it can override or sunset any local change. Motif is a **follower**, not an authority.
 
-## Docs and Blog
+## Design constraints
 
-To learn more about Kuzu, see our [Documentation](https://kuzudb.github.io/docs) and [Blog](https://kuzudb.github.io/blog) page.
+- **Tiny binary.** Target <5 MB stripped WASM.
+- **Tiny on-disk footprint.** Single-file storage, no extensions.
+- **Fast I/O.** <50 ms p50 single-key read on mid-tier mobile.
+- **Offline-first.** Reads return stale-with-flag on miss. Writes queue locally and sync when connectivity returns.
+- **Hostile-device-aware.** Per-user + per-device auth. Storage layer keeps encryption-at-rest as a future option.
 
-## Getting Started
+## Build (development)
 
-Refer to our [Getting Started](https://kuzudb.github.io/docs/get-started/) page for your first example.
-
-## Extensions
-Kuzu has an extension framework that users can dynamically load the functionality you need at runtime.
-We've developed a list of [official extensions](https://kuzudb.github.io/docs/extensions/#available-extensions) that you can use to extend Kuzu's functionality.
-
-Kuzu requires you to install the extension before loading and using it.
-Note that Kuzu no longer provides the official extension server, where you can directly install any official extensions.
-
-If you've upgraded to the latest version v0.11.3, Kuzu has pre-installed four commonly used extensions (`algo`, `fts`, `json`, `vector`) for you.
-You do not need to manually INSTALL these extensions.
-
-For Kuzu versions before v0.11.3, or to install extensions that haven't been pre-installed, you have to set up a local extension server.
-The instructions of setting up a local extension server can be found below.
-
-### Host your own extension server
-
-The extension server is based on NGINX and is hosted on [GitHub](https://ghcr.io/kuzudb/extension-repo). You can pull the Docker image and run it in your environment:
+WASM is the only target. iOS, Android, and edge devices all run the WASM artifact.
 
 ```bash
-docker pull ghcr.io/kuzudb/extension-repo:latest
-docker run -d -p 8080:80 ghcr.io/kuzudb/extension-repo:latest
+# Requires emsdk
+make wasm
+cd tools/wasm && npm install && npm run build
 ```
 
-In this example, the extension server will be available at `http://localhost:8080`. You can then install extensions from your server by appending the `FROM` clause to the `INSTALL` command:
+## Provenance
 
-```cypher
-INSTALL <EXTENSION_NAME> FROM 'http://localhost:8080/';
-```
-
-## Build from Source
-
-You can build from source using the instructions provided in the [developer guide](https://kuzudb.github.io/docs/developer-guide).
+Motif is derived from Kuzu (MIT). Upstream Kuzu has been archived. Original `kuzu::` C++ namespace and many internal artifact names are retained in v0.0.1 — namespace rename is scheduled for v0.0.2.
 
 ## License
-Kuzu is licensed under the [MIT License](LICENSE).
+
+MIT — see [LICENSE](./LICENSE).

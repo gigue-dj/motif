@@ -1,40 +1,41 @@
 name: Build WebAssembly module
 
 on:
+  push:
+    branches:
+      - master
+      - 'claude/**'
+  pull_request:
   workflow_dispatch:
-  workflow_call:
-    inputs:
-      isNightly:
-        type: boolean
-        required: true
-        default: false
 
 jobs:
   build-wasm:
-    runs-on: kuzu-self-hosted-testing
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Update nightly version
-        if: ${{ inputs.isNightly == true }}
-        env:
-          PIP_BREAK_SYSTEM_PACKAGES: 1
-        run: |
-          python3 -m pip install packaging
-          python3 update-nightly-build-version.py
-        working-directory: scripts
-      
-      - name: Install dependencies
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Emscripten SDK
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 3.1.59
+
+      - name: Verify emsdk
+        run: emcc --version
+
+      - name: Install JS dependencies
         working-directory: tools/wasm
-        run: npm i
-      
+        run: npm install
+
       - name: Build WebAssembly package
         working-directory: tools/wasm
-        run: |
-          source /home/runner/emsdk/emsdk_env.sh
-          npm run build
+        run: npm run build
 
       - uses: actions/upload-artifact@v4
         with:
-          name: kuzu-deploy-wasm
-          path: tools/wasm/kuzu-wasm.tar.gz
+          name: motif-wasm
+          path: tools/wasm/motif-wasm.tar.gz
