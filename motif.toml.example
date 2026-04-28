@@ -1,0 +1,23 @@
+# Motif configuration. Host applications own this file and pass its path to
+# `Motif::open()`. Schema is owned by the upstream controller and pushed to
+# Motif at runtime; nothing about the data shape lives here.
+#
+# All fields are required in v0.0.1. Defaults will be introduced only when
+# we have a concrete reason to.
+
+[identity]
+# Per-user + per-device identity. Both fields are mandatory: the controller
+# uses the pair for audit and conflict resolution. Treat the device as
+# potentially compromised — the user_id alone is not sufficient.
+user_id = "u_replace_me"
+device_id = "d_replace_me"
+
+[controller]
+# Where committed mutations are sent. v0.0.1-alpha.2 only supports
+# `in-memory`. SurrealDB transport (`kind = "surreal"`) lands in v0.0.2.
+kind = "in-memory"
+
+[storage]
+# Single-file local store. The actual storage engine lands in alpha.3; for
+# alpha.2 this path is parsed and validated but not yet opened.
+path = "./motif.db"

@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/motif-core",
+    "crates/motif-wasm",
+    "crates/motif-cli",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.78"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/gigue-dj/motif"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+thiserror = "1"
+wasm-bindgen = "0.2"
+motif-core = { path = "crates/motif-core", version = "0.0.1" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

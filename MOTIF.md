@@ -2,26 +2,18 @@
 
 This document captures the architectural decisions for Motif v0.0.1 and the
 scope of the alpha milestones. It is the single source of truth for the
-"what and why" of the fork from Kuzu. If something here disagrees with code,
+"what and why" of the project. If something here disagrees with code,
 the doc is wrong — open an issue.
-
-> **Repo layout note (post alpha.1).** The C++ Kuzu fork that constituted
-> alpha.1 has been moved to `cpp-reference/` and is frozen. It serves as a
-> behavioural spec for the Rust port that begins in alpha.2. The `Locked-in
-> decisions` table and the milestone structure below were written against
-> the C++ baseline; both are scheduled for a substantive update in the
-> alpha.2 commit to capture the Rust pivot decisions
-> (`wasm32-unknown-unknown`, sync core, hand-rolled parser, dual MIT/Apache
-> license, hostile-device assumptions, TOML config, etc.).
 
 ## What Motif is
 
-Motif is a **follower** graph store. A small embedded engine, derived from
-[Kuzu](https://github.com/kuzudb/kuzu/), packaged as a WebAssembly module and
-embedded in mobile apps and edge devices. It holds a local property graph for
-query speed and offline operation. **It is not the source of truth for any
-data it holds.** Integrity, schema, and conflict resolution belong to an
-upstream **controller**.
+Motif is a **follower** graph store. A small embedded engine, packaged as a
+WebAssembly module (`wasm32-unknown-unknown`) and embedded in mobile apps
+and edge devices via their host language's wasm runtime — primarily Swift
+and Rust. It holds a local property graph for query speed and offline
+operation. **It is not the source of truth for any data it holds.**
+Integrity, schema, and conflict resolution belong to an upstream
+**controller** (SurrealDB today, a custom Nebula-class controller later).
 
 ## What Motif is not
 
@@ -29,15 +21,14 @@ upstream **controller**.
 - Not authoritative.
 - Not a long-lived store. The local file is a working cache; the controller
   can sunset any local state.
-- Not a portable replacement for Kuzu. Motif drops most of Kuzu's surface
-  area (extensions, language bindings, vector/FTS, multi-platform precompiled
-  binaries).
+- Not a browser-facing database. v0.0.1 explicitly assumes a Swift or Rust
+  host. Browsers, fetch-based hosts, and WASI runtimes are out of scope.
 
 ## Topology
 
 ```
   ┌───────────────────────────────────────────────────────┐
-  │ host app  (iOS / Android / edge)                      │
+  │ host app  (Swift on iOS / Rust on edge / Android)     │
   │                                                       │
   │   ┌─────────────────────────┐    ┌──────────────────┐ │
   │   │ Motif (wasm)            │    │ object graph     │ │
@@ -57,60 +48,59 @@ upstream **controller**.
             └────────────────────┘
 ```
 
-## Locked-in decisions (v0.0.1)
+## Locked-in decisions
 
 | # | Topic | Decision |
 |---|---|---|
-| 1 | Target platform | WASM only. iOS, Android, and edge devices all run the same wasm artifact. |
-| 2 | Controller | SurrealDB for v0.0.x. Custom Nebula-class controller later. |
-| 3 | Auth | Per-user **and** per-device. Treat all devices as potentially compromised. JWT-style bearer for users; per-device key for device identity. (No transport in v0.0.1; identity surfaced as `userId` + `deviceId` parameters.) |
-| 4 | Conflict resolution | **Server-wins.** Local can apply optimistic mutations; controller can override or sunset them. (Provisional/CRDT shadow layer is a v0.0.2 design item, see open questions.) |
-| 5 | Local read miss | Return stale-with-flag. Async refresh. Never block on the controller. |
-| 6 | Offline mode | First-class from day 0. Writes queue locally; reads work without connectivity. |
-| 7 | Schema ownership | Controller owns schema and pushes to followers. Motif does not declare. v0.0.1 accepts a JSON descriptor injected by the host app at open time; live push lands in v0.0.2. |
-| 8 | Query language | Internal: Kuzu's Cypher subset (CRUD only, gated at the binder). Boundary: SurrealQL translation lands in v0.0.2 once real transport is wired. |
-| 9 | Encryption-at-rest | Out of scope for v0.0.1; storage layer must not preclude it. |
-| 10 | Terminology | "Follower," not "slave/replica." |
+| 1 | Implementation language | **Rust.** No team C++ expertise; the C++ Kuzu fork at `cpp-reference/` is a behavioural reference only. |
+| 2 | WASM target | **`wasm32-unknown-unknown`.** No WASI, no browser host. Swift/Rust host apps embed a wasm runtime (e.g. `wasmtime`) and accept the perf tax. Native targets (e.g. `aarch64-apple-ios`) are deferred to v0.0.2+. |
+| 3 | Controller | SurrealDB for v0.0.x. Custom Nebula-class controller later. |
+| 4 | Auth | Per-user **and** per-device. Treat all devices as potentially compromised. JWT-style bearer for users; per-device key for device identity. (No transport in v0.0.1; identity surfaced as `user_id` + `device_id` in `motif.toml`.) |
+| 5 | Conflict resolution | **Server-wins.** Local can apply optimistic mutations; controller can override or sunset them. Provisional/CRDT shadow layer is a v0.0.2 design item. |
+| 6 | Local read miss | Return stale-with-flag. Async refresh. Never block on the controller. |
+| 7 | Offline mode | First-class from day 0. Writes queue locally; reads work without connectivity. |
+| 8 | Schema ownership | Controller owns schema and pushes to followers. Motif does not declare. v0.0.1 treats schema as opaque. Live push lands in v0.0.2. |
+| 9 | Configuration | **TOML.** `motif.toml` lives next to the host app, parsed via `serde + toml`. See `motif.toml.example`. |
+| 10 | Storage format | Greenfield Rust. **No on-disk compatibility** with the C++ baseline. |
+| 11 | Query parser | **Hand-rolled recursive descent** for the Cypher subset in v0.0.1 (~500 LOC target). No `nom`/`pest`/`chumsky`. Reassess once exit criteria are met. |
+| 12 | Async runtime | **Sync `motif-core`**, async at the edges if needed. No `tokio` in core. A `smol` or `async-std` reactor may land later if the controller transport demands it. |
+| 13 | Encryption-at-rest | Out of scope for v0.0.1; storage layer must not preclude it. |
+| 14 | Distribution | Internally usable only. Crates exist (`motif-core`, `motif-wasm`, `motif-cli`) with `publish = false`. Public crates.io publishing deferred. |
+| 15 | License | **Dual MIT / Apache-2.0** — Rust crates.io convention. The cpp-reference subdirectory remains MIT (inherited from Kuzu). |
+| 16 | Safety | `unsafe_code = "forbid"` at workspace level. Easier to defend on hostile devices. |
+| 17 | Terminology | "Follower," not "slave/replica." |
 
-## v0.0.1 scope
+## Milestone structure
 
-### v0.0.1-alpha.1 (this milestone — foundation)
+| milestone | content | status |
+|---|---|---|
+| **alpha.1** | Fork upstream Kuzu, prune extensions/bindings/benchmarks, top-level rebrand, C++ sync skeleton in `src/sync/`. | ✅ shipped |
+| **alpha.1.5** | Mechanical move of the C++ tree into `cpp-reference/` so the Rust crates can land at the top level. | ✅ shipped |
+| **alpha.2** | Rust workspace: `crates/{motif-core, motif-wasm, motif-cli}`. TOML config (`MotifConfig`) via `serde`. Sync skeleton ported 1:1 from C++ (`ControllerClient` trait, `MutationLog`, `InMemoryControllerClient`). Rust CI (`fmt`, `clippy`, `test`, `wasm32-unknown-unknown` build). Dual licensing in place. **No engine yet.** | ✅ shipped |
+| **alpha.3** | Minimal Rust storage: single-file append log + in-memory id→offset index. Node/edge insert + get-by-id only. ~1k LOC. | pending |
+| **alpha.4** | Hand-rolled recursive-descent parser + direct interpreter for a tiny Cypher subset (`CREATE`, `MATCH (n) WHERE id(n)=$x RETURN n`, `MERGE`, `DELETE`). ~800 LOC. | pending |
+| **alpha.5** | `wasm-bindgen` `Motif::open(&MotifConfig)` API, latency harness in `wasmtime`, WAL→`MutationLog` hook wired, `wasm-opt -Oz`. | pending |
+| **v0.0.1** | Hits exit criteria below. Tag `cpp-reference/` for archival. | pending |
 
-- [x] Fork from Kuzu, prune extensions, language bindings, benchmarks,
-      multi-platform CI.
-- [x] Top-level rebrand (CMake project name, WASM `EXPORT_NAME`, npm package
-      name, README). C++ `kuzu::` namespace retained — rename is v0.0.2.
-- [x] Slim Makefile + single CI workflow (`wasm-workflow.yml`,
-      `ubuntu-latest`).
-- [x] `MOTIF.md` (this file) capturing decisions.
-- [x] `src/sync/` skeleton: `ControllerClient` interface and `MutationLog`
-      data structure. No transport. No WAL hook yet.
-- [ ] `cmake -DBUILD_WASM=TRUE` configures cleanly after prune.
+## Exit criteria for v0.0.1
 
-### v0.0.1-alpha.2 (architectural validation)
+1. `cargo build --release --target wasm32-unknown-unknown -p motif-wasm` produces a module loadable from a `wasmtime` host. **And** `cargo run -p motif-cli -- print-config motif.toml.example` round-trips cleanly.
+2. Library API: `Motif::open(&MotifConfig)` returns a handle. `MotifConfig` is loaded via `serde + toml` from `motif.toml`.
+3. TOML schema documented in `motif.toml.example`; `serde` rejects malformed configs with a useful error.
+4. Query API: `motif.query("MATCH (n) RETURN n LIMIT 10")` returns rows.
+5. p50 single-node lookup <50 ms in `wasmtime` on a representative mid-tier dev box (proxy for mobile).
+6. WASM artifact <2 MB after `wasm-opt -Oz`. (Current alpha.2 stub: 358 KB unstripped — plenty of headroom.)
+7. Mutation tee verified: every commit produces a `Mutation` in the registered `ControllerClient` (test spy).
+8. No `unsafe` in `motif-core`. (Enforced by `#![forbid(unsafe_code)]` in alpha.2.)
+9. TOML round-trip: `MotifConfig::from_toml_str(&cfg.to_toml_string())` yields the same value.
 
-- [ ] WAL commit hook tees mutations to `MutationLog`. Verify by test spy.
-- [ ] `Motif.open(path, { userId, deviceId, schema })` JS wrapper over the
-      existing `Database`/`Connection` API. `userId` and `deviceId`
-      required.
-- [ ] e2e harness in `test/motif_mvp/` measuring p50/p95 single-node read
-      latency in a headless Chrome wasm context.
+## Explicitly out of scope for v0.0.1
 
-### v0.0.1 exit criteria
-
-1. `npm install motif-wasm && new Motif().query("MATCH (n) RETURN n LIMIT 10")`
-   works in a browser tab.
-2. p50 single-node lookup <50 ms on a mid-tier Android via WASM in Chrome.
-3. Stripped wasm artifact <5 MB.
-4. Mutation hook fires `ControllerClient.applyMutation` for every commit
-   (verified by test spy).
-
-### Explicitly out of scope for v0.0.1
-
-iOS/Android native bindings, real network transport to SurrealDB,
-provisional-write shadow layer / scoped CRDT, conflict resolution wire
-protocol, offline replay, JWT/auth signing, encryption-at-rest, vector
-search, full-text search, multi-tenant, schema migrations.
+iOS/Android native targets (`aarch64-apple-ios`, `aarch64-linux-android`),
+real network transport to SurrealDB, provisional-write shadow layer /
+scoped CRDT, conflict resolution wire protocol, offline replay, JWT/auth
+signing, encryption-at-rest, vector search, full-text search, multi-tenant,
+schema migrations, browser/WASI hosts, public crates.io publication.
 
 ## Open questions for v0.0.2
 
@@ -118,23 +108,44 @@ search, full-text search, multi-tenant, schema migrations.
    Do we model "provisional" as a per-mutation flag in `MutationLog`, or as
    a parallel shadow store that the WAL replayer reconciles? Trade-off is
    memory/space vs. read-path complexity.
-2. **SurrealQL boundary.** Translate at the JS API layer (motif-wasm
+2. **SurrealQL boundary.** Translate at the API layer (motif-wasm
    accepts SurrealQL strings, transpiles to Cypher before hitting the
-   binder), or swap the parser entirely (replace
-   `third_party/antlr4_cypher` with a SurrealQL grammar)? Translation is
-   cheaper for v0.0.x.
-3. **Schema push channel.** Same transport as mutations (WS), or a
-   distinct control channel? Affects how schema versions interact with
-   pending mutations.
+   interpreter), or swap parsers entirely? Translation is cheaper for v0.0.x.
+3. **Schema push channel.** Same transport as mutations, or a distinct
+   control channel? Affects how schema versions interact with pending
+   mutations.
 4. **Device key provisioning.** Per-device keys assume a first-run pairing
    flow. Owned by host app, or by Motif?
 5. **Sunset semantics.** Concretely: when the controller "overrides" a
    provisional change, does Motif emit a notification to the host app's
    object graph, and what does that look like ergonomically?
+6. **Persisted MutationLog.** v0.0.1 keeps it in-process. Where does the
+   persisted version live — alongside the WAL, or as a separate journal?
+7. **Async transport.** Will the SurrealDB transport demand a runtime in
+   `motif-core`, or can we keep it pure-sync with a thread per controller?
+
+## Repository layout
+
+```
+motif/
+  Cargo.toml                  # workspace root
+  rust-toolchain.toml         # pins stable + wasm32-unknown-unknown
+  motif.toml.example          # canonical config schema
+  crates/
+    motif-core/               # engine library, sync core, no_unsafe
+    motif-wasm/               # wasm-bindgen surface (cdylib)
+    motif-cli/                # dev/smoke CLI
+  cpp-reference/              # frozen alpha.1 C++ tree, behavioural spec
+  .github/workflows/rust.yml  # fmt + clippy + test + wasm32 build
+  LICENSE-MIT, LICENSE-APACHE
+  MOTIF.md, README.md
+```
 
 ## Provenance
 
-Motif is derived from Kuzu (MIT). The C++ engine — storage, WAL, transactions,
-binder, planner, vectorized executor — is upstream Kuzu, retained verbatim
-in v0.0.1. The Motif-specific code is everything under `src/sync/`, the
-top-level rebrand, and the Cypher-subset gating that lands in v0.0.2.
+The frozen C++ reference under `cpp-reference/` is derived from
+[Kuzu](https://github.com/kuzudb/kuzu/) (MIT). Upstream Kuzu has been
+archived. The Rust crates are greenfield code informed by the C++ baseline
+as a behavioural spec; the storage and query engines are designed for
+mobile constraints and do not preserve any on-disk or namespace
+compatibility.
