@@ -17,6 +17,7 @@ use std::collections::HashMap;
 
 use crate::config::MotifConfig;
 use crate::graph::{Edge, Node};
+use crate::query::{self, Params, QueryError, QueryResult};
 use crate::record::{decode_framed, encode_framed, Record, RecordError, LEN_PREFIX_BYTES};
 use crate::storage::{FileStorage, MemoryStorage, Storage, StorageError, HEADER_LEN};
 
@@ -36,6 +37,8 @@ pub enum EngineError {
         #[source]
         source: RecordError,
     },
+    #[error("query error: {0}")]
+    Query(#[from] QueryError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,15 +121,26 @@ impl Engine {
             match decode_framed(&frame) {
                 Ok(Some((record, consumed))) => {
                     debug_assert_eq!(consumed, total_record);
-                    let entry = IndexEntry {
-                        offset: cursor,
-                        payload_len,
-                        kind: match &record {
-                            Record::NodeInsert(_) => Kind::Node,
-                            Record::EdgeInsert(_) => Kind::Edge,
-                        },
-                    };
-                    self.index.insert(record.id().to_owned(), entry);
+                    match &record {
+                        Record::NodeInsert(_) | Record::EdgeInsert(_) => {
+                            let kind = match &record {
+                                Record::NodeInsert(_) => Kind::Node,
+                                Record::EdgeInsert(_) => Kind::Edge,
+                                _ => unreachable!(),
+                            };
+                            self.index.insert(
+                                record.id().to_owned(),
+                                IndexEntry {
+                                    offset: cursor,
+                                    payload_len,
+                                    kind,
+                                },
+                            );
+                        }
+                        Record::NodeDelete(id) | Record::EdgeDelete(id) => {
+                            self.index.remove(id);
+                        }
+                    }
                     cursor += total_record as u64;
                     last_good = cursor;
                 }
@@ -186,6 +200,69 @@ impl Engine {
         Ok(())
     }
 
+    /// Delete a node by id. v0.0.1 does not enforce referential integrity:
+    /// edges that reference a deleted node become dangling. The query
+    /// layer treats them as unreachable. A `DETACH DELETE`-style cascade
+    /// lands when the controller-side conflict resolution does in v0.0.2.
+    pub fn delete_node(&mut self, id: &str) -> Result<bool, EngineError> {
+        if !self.has_node(id) {
+            return Ok(false);
+        }
+        let frame = encode_framed(&Record::NodeDelete(id.to_owned()))?;
+        self.storage.append(&frame)?;
+        self.index.remove(id);
+        Ok(true)
+    }
+
+    pub fn delete_edge(&mut self, id: &str) -> Result<bool, EngineError> {
+        if !self.has_edge(id) {
+            return Ok(false);
+        }
+        let frame = encode_framed(&Record::EdgeDelete(id.to_owned()))?;
+        self.storage.append(&frame)?;
+        self.index.remove(id);
+        Ok(true)
+    }
+
+    /// Materialize all live nodes. v0.0.1 does an O(N) scan because the
+    /// only secondary index is the id map. Acceptable up to the alpha-era
+    /// graph sizes (~1k nodes); a label/property index is alpha.5+ work.
+    pub fn iter_nodes(&mut self) -> Result<Vec<Node>, EngineError> {
+        let entries: Vec<(String, IndexEntry)> = self
+            .index
+            .iter()
+            .filter(|(_, e)| e.kind == Kind::Node)
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        let mut out = Vec::with_capacity(entries.len());
+        for (_, entry) in entries {
+            let frame_len = LEN_PREFIX_BYTES + entry.payload_len as usize;
+            let bytes = self.storage.read_at(entry.offset, frame_len)?;
+            if let Some((Record::NodeInsert(n), _)) = decode_framed(&bytes)? {
+                out.push(n);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn iter_edges(&mut self) -> Result<Vec<Edge>, EngineError> {
+        let entries: Vec<(String, IndexEntry)> = self
+            .index
+            .iter()
+            .filter(|(_, e)| e.kind == Kind::Edge)
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        let mut out = Vec::with_capacity(entries.len());
+        for (_, entry) in entries {
+            let frame_len = LEN_PREFIX_BYTES + entry.payload_len as usize;
+            let bytes = self.storage.read_at(entry.offset, frame_len)?;
+            if let Some((Record::EdgeInsert(e), _)) = decode_framed(&bytes)? {
+                out.push(e);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn get_node(&mut self, id: &str) -> Result<Option<Node>, EngineError> {
         match self.read(id, Kind::Node)? {
             Some(Record::NodeInsert(n)) => Ok(Some(n)),
@@ -226,6 +303,14 @@ impl Engine {
 
     pub fn node_count(&self) -> usize {
         self.index.values().filter(|e| e.kind == Kind::Node).count()
+    }
+
+    /// Execute a Cypher-subset query. See `query` module docs for the
+    /// supported grammar in v0.0.1.
+    pub fn query(&mut self, cypher: &str, params: &Params) -> Result<QueryResult, EngineError> {
+        let stmt = query::parse(cypher)?;
+        let result = query::execute(self, &stmt, params).map_err(QueryError::from)?;
+        Ok(result)
     }
 
     pub fn edge_count(&self) -> usize {

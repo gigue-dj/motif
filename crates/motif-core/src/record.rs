@@ -22,6 +22,8 @@ use crate::graph::{Edge, Node};
 pub enum Record {
     NodeInsert(Node),
     EdgeInsert(Edge),
+    NodeDelete(String),
+    EdgeDelete(String),
 }
 
 impl Record {
@@ -29,6 +31,7 @@ impl Record {
         match self {
             Record::NodeInsert(n) => &n.id,
             Record::EdgeInsert(e) => &e.id,
+            Record::NodeDelete(id) | Record::EdgeDelete(id) => id,
         }
     }
 }
