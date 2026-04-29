@@ -77,7 +77,7 @@ Integrity, schema, and conflict resolution belong to an upstream
 | **alpha.1** | Fork upstream Kuzu, prune extensions/bindings/benchmarks, top-level rebrand, C++ sync skeleton in `src/sync/`. | ✅ shipped |
 | **alpha.1.5** | Mechanical move of the C++ tree into `cpp-reference/` so the Rust crates can land at the top level. | ✅ shipped |
 | **alpha.2** | Rust workspace: `crates/{motif-core, motif-wasm, motif-cli}`. TOML config (`MotifConfig`) via `serde`. Sync skeleton ported 1:1 from C++ (`ControllerClient` trait, `MutationLog`, `InMemoryControllerClient`). Rust CI (`fmt`, `clippy`, `test`, `wasm32-unknown-unknown` build). Dual licensing in place. **No engine yet.** | ✅ shipped |
-| **alpha.3** | Minimal Rust storage: single-file append log + in-memory id→offset index. Node/edge insert + get-by-id only. ~1k LOC. | pending |
+| **alpha.3** | Minimal Rust storage: single-file append log with 16-byte header + length-prefixed `bincode` records, in-memory `id → offset` index, replay-on-open recovery (truncates torn tails), `Engine::insert_node` / `insert_edge` / `get_node` / `get_edge`. Pluggable `Storage` trait with `FileStorage` (native, `fsync` per write) and `MemoryStorage` (tests + future wasm shim). 1,014 LOC, 21 unit tests + 2 integration tests, no `unsafe`. | ✅ shipped |
 | **alpha.4** | Hand-rolled recursive-descent parser + direct interpreter for a tiny Cypher subset (`CREATE`, `MATCH (n) WHERE id(n)=$x RETURN n`, `MERGE`, `DELETE`). ~800 LOC. | pending |
 | **alpha.5** | `wasm-bindgen` `Motif::open(&MotifConfig)` API, latency harness in `wasmtime`, WAL→`MutationLog` hook wired, `wasm-opt -Oz`. | pending |
 | **v0.0.1** | Hits exit criteria below. Tag `cpp-reference/` for archival. | pending |
