@@ -2,10 +2,10 @@
 
 **Motif** is a tiny, embedded follower graph store. It targets Swift and Rust application codebases on mobile and edge, with integrity outsourced to an upstream controller database (SurrealDB today, a custom Nebula-class controller later).
 
-> **Status:** v0.0.1-alpha.1 frozen. The repo is mid-pivot from a C++ Kuzu fork to a greenfield Rust implementation. See [`MOTIF.md`](./MOTIF.md) for the design rationale and the v0.0.1 milestone plan.
+> **Status:** v0.0.1-alpha.4 — engine + query layer green, sync transport pending. The repo is mid-pivot from a C++ Kuzu fork to a greenfield Rust implementation. See [`MOTIF.md`](./MOTIF.md) for the design rationale and milestone plan, and [`LIMITATIONS.md`](./LIMITATIONS.md) for the running ledger of known caveats.
 >
 > - **`cpp-reference/`** — alpha.1 C++ tree, scoped down from upstream Kuzu. Frozen reference; not the shipping artifact. Will be archived once v0.0.1 ships.
-> - **Top level** — Rust workspace lands in alpha.2.
+> - **Top level** — Rust workspace (`crates/motif-core`, `crates/motif-wasm`, `crates/motif-cli`).
 
 ## Architecture in one paragraph
 
