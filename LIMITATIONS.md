@@ -160,16 +160,24 @@ pass can grep its way to the source.
 - `[gap]` **No transport.** Only `InMemoryControllerClient` exists.
   Real SurrealDB transport (probably WS or HTTP) is v0.0.2.
   *Source:* `crates/motif-core/src/sync/controller_client.rs:1-7`.
-- `[gap]` **`MutationLog` not yet teed from the engine.** The engine
-  appends records to disk but does not enqueue corresponding
-  `Mutation`s on the wired `MutationLog`. Lands in alpha.5; this is
-  the architectural validation step.
-  *Source:* `crates/motif-core/src/engine.rs` (no call to
-  `MutationLog::record`).
 - `[gap]` **`MutationLog` is in-process only.** Crash-safe persisted
   log alongside storage is v0.0.2. Until then, queued mutations are
   lost on restart.
   *Source:* `crates/motif-core/src/sync/mutation_log.rs:5-9`.
+- `[debt]` **Tee fires after the storage append but before the index
+  publishes for inserts.** A panic between those two steps would leave
+  a record on disk that subsequent recovery picks up, with the
+  controller already informed — fine. The opposite order would let a
+  reader observe a write the controller doesn't know about, so the
+  current order is intentional. Document and lock in with a panic-
+  safety test in the audit pass.
+  *Source:* `crates/motif-core/src/engine.rs` (`append_record`,
+  `tee_mutation`).
+- `[debt]` **`read_label` for delete tees does an extra read.**
+  We re-read the deleted record's frame just to recover the label so
+  the `Mutation::table_name` field is meaningful. Cheap (one offset
+  read) but redundant; a label cache on `IndexEntry` is a v0.0.2 win.
+  *Source:* `crates/motif-core/src/engine.rs` (`read_label`).
 - `[scope]` **`wal_payload` is opaque bytes.** v0.0.1 forwards
   serialized engine records verbatim. Structured diffs for the
   controller arrive when the SurrealQL boundary lands.
@@ -181,14 +189,32 @@ pass can grep its way to the source.
 
 ## Bindings (`motif-wasm`, `motif-cli`)
 
-- `[gap]` **`motif-wasm` is a stub.** Only exports `version()` and
-  `validate_config(toml_src)`. Real `Motif::open` / `query` bindings
-  land in alpha.5.
-  *Source:* `crates/motif-wasm/src/lib.rs:1-7`.
-- `[gap]` **`motif-cli` is a stub.** Only `print-config` and
-  `version`. A `motif query` repl-ish entry point and a
-  `motif bench` latency harness are alpha.5 work.
-  *Source:* `crates/motif-cli/src/main.rs:1-3`.
+- `[scope]` **`Motif::open` on wasm uses `MemoryStorage`.** No
+  filesystem on `wasm32-unknown-unknown`, so the `storage.path` field
+  of the TOML config is ignored on the wasm path. A host-provided
+  storage shim (OPFS / app sandbox / wasm-bindgen-driven I/O) is
+  post-v0.0.1.
+  *Source:* `crates/motif-wasm/src/lib.rs:1-15`.
+- `[scope]` **Wasm params + result marshalled as JSON strings.** No
+  `serde-wasm-bindgen` dependency; host wraps in `JSON.stringify` /
+  `JSON.parse`. Acceptable for v0.0.1 (one allocation per call); a
+  binary marshalling path is v0.0.2 if profiling shows it matters.
+  *Source:* `crates/motif-wasm/src/lib.rs` (`query`, `parse_params`).
+- `[debt]` **Wasm `params_json` rejects nested objects / arrays.**
+  Only scalar params (`null`, `bool`, integers, floats, strings).
+  Lists / structs of values land when the engine grows them.
+  *Source:* `crates/motif-wasm/src/lib.rs:107-112`.
+- `[debt]` **Wasm `mutation_count` is a buffered-only counter.** It
+  reports `MutationLog::buffered_len` — fine while no client is wired
+  on the wasm path, but if a real client is connected later the
+  counter will under-report. Add an explicit per-instance counter in
+  the audit pass.
+  *Source:* `crates/motif-wasm/src/lib.rs` (`mutation_count`).
+- `[scope]` **`motif-cli bench` measures in-memory storage on
+  native.** Does not exercise `FileStorage` (and therefore not the
+  `fsync`-per-write cost). A separate file-backed bench is post-v0.0.1
+  — useful for the storage perf knob discussion in v0.0.2.
+  *Source:* `crates/motif-cli/src/main.rs` (`run_bench`).
 
 ## Operations / observability
 

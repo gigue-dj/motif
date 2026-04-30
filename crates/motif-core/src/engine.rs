@@ -14,12 +14,14 @@
 //! seeks the file cursor on `read_at`.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::config::MotifConfig;
 use crate::graph::{Edge, Node};
 use crate::query::{self, Params, QueryError, QueryResult};
 use crate::record::{decode_framed, encode_framed, Record, RecordError, LEN_PREFIX_BYTES};
 use crate::storage::{FileStorage, MemoryStorage, Storage, StorageError, HEADER_LEN};
+use crate::sync::{ActorId, Mutation, MutationKind, MutationLog};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -60,6 +62,14 @@ pub struct Engine {
     /// v0.0.1 keeps both nodes and edges in a single map; ids must be
     /// globally unique. v0.0.2 may split this if the namespaces collide.
     index: HashMap<String, IndexEntry>,
+    /// Per-instance actor identity copied from `MotifConfig::identity`.
+    /// Stamped onto every `Mutation` teed at commit time.
+    actor: ActorId,
+    /// Optional sink for committed mutations. When wired (via
+    /// `Engine::with_mutation_log`), every successful insert / delete
+    /// produces a `Mutation` after the storage append, so the controller
+    /// sees exactly what landed on disk.
+    mutation_log: Option<Arc<MutationLog>>,
 }
 
 impl Engine {
@@ -80,16 +90,33 @@ impl Engine {
     }
 
     /// Open with a caller-provided backend.
-    pub fn open_with(
-        _config: &MotifConfig,
-        storage: Box<dyn Storage>,
-    ) -> Result<Self, EngineError> {
+    pub fn open_with(config: &MotifConfig, storage: Box<dyn Storage>) -> Result<Self, EngineError> {
         let mut engine = Self {
             storage,
             index: HashMap::new(),
+            actor: ActorId {
+                user_id: config.identity.user_id.clone(),
+                device_id: config.identity.device_id.clone(),
+            },
+            mutation_log: None,
         };
         engine.recover()?;
         Ok(engine)
+    }
+
+    /// Wire a `MutationLog` to receive a `Mutation` for every committed
+    /// insert / delete. The hook fires *after* the storage append succeeds
+    /// (so a queued mutation always corresponds to a record on disk) and
+    /// before the in-memory index is updated for inserts (so the index is
+    /// only "live" once the controller has been informed).
+    pub fn with_mutation_log(mut self, log: Arc<MutationLog>) -> Self {
+        self.mutation_log = Some(log);
+        self
+    }
+
+    /// Test/inspection helper: read the current actor identity.
+    pub fn actor(&self) -> &ActorId {
+        &self.actor
     }
 
     /// Replay the log from the start, rebuilding the in-memory index.
@@ -189,6 +216,21 @@ impl Engine {
         let frame = encode_framed(&record)?;
         let payload_len = (frame.len() - LEN_PREFIX_BYTES) as u32;
         let offset = self.storage.append(&frame)?;
+        // Tee to the controller before we publish to the index, so a
+        // reader cannot observe the change until the controller has been
+        // informed. The tee is best-effort: if no log is wired, this is
+        // a no-op.
+        let kind_for_mutation = match (&record, kind) {
+            (Record::NodeInsert(_), _) => MutationKind::NodeInsert,
+            (Record::EdgeInsert(_), _) => MutationKind::RelInsert,
+            _ => unreachable!("append_record only called for inserts"),
+        };
+        let table_name = match &record {
+            Record::NodeInsert(n) => n.label.clone(),
+            Record::EdgeInsert(e) => e.label.clone(),
+            _ => unreachable!(),
+        };
+        self.tee_mutation(kind_for_mutation, table_name, &frame[LEN_PREFIX_BYTES..]);
         self.index.insert(
             id,
             IndexEntry {
@@ -200,6 +242,19 @@ impl Engine {
         Ok(())
     }
 
+    fn tee_mutation(&self, kind: MutationKind, table_name: String, payload: &[u8]) {
+        let Some(log) = &self.mutation_log else {
+            return;
+        };
+        log.record(Mutation {
+            local_seq: 0, // overwritten by MutationLog::record
+            kind,
+            actor: self.actor.clone(),
+            table_name,
+            wal_payload: payload.to_vec(),
+        });
+    }
+
     /// Delete a node by id. v0.0.1 does not enforce referential integrity:
     /// edges that reference a deleted node become dangling. The query
     /// layer treats them as unreachable. A `DETACH DELETE`-style cascade
@@ -208,8 +263,13 @@ impl Engine {
         if !self.has_node(id) {
             return Ok(false);
         }
+        // Capture the label *before* deletion so the controller mutation
+        // can carry it. v0.0.1 has no other way to recover the label from
+        // an id once the index entry is gone.
+        let label = self.read_label(id)?.unwrap_or_default();
         let frame = encode_framed(&Record::NodeDelete(id.to_owned()))?;
         self.storage.append(&frame)?;
+        self.tee_mutation(MutationKind::NodeDelete, label, id.as_bytes());
         self.index.remove(id);
         Ok(true)
     }
@@ -218,10 +278,25 @@ impl Engine {
         if !self.has_edge(id) {
             return Ok(false);
         }
+        let label = self.read_label(id)?.unwrap_or_default();
         let frame = encode_framed(&Record::EdgeDelete(id.to_owned()))?;
         self.storage.append(&frame)?;
+        self.tee_mutation(MutationKind::RelDelete, label, id.as_bytes());
         self.index.remove(id);
         Ok(true)
+    }
+
+    fn read_label(&mut self, id: &str) -> Result<Option<String>, EngineError> {
+        let Some(entry) = self.index.get(id).copied() else {
+            return Ok(None);
+        };
+        let frame_len = LEN_PREFIX_BYTES + entry.payload_len as usize;
+        let bytes = self.storage.read_at(entry.offset, frame_len)?;
+        Ok(decode_framed(&bytes)?.and_then(|(r, _)| match r {
+            Record::NodeInsert(n) => Some(n.label),
+            Record::EdgeInsert(e) => Some(e.label),
+            _ => None,
+        }))
     }
 
     /// Materialize all live nodes. v0.0.1 does an O(N) scan because the
