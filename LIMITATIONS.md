@@ -57,9 +57,20 @@ pass can grep its way to the source.
   per-device-key flow is v0.0.2 work.
   *Source:* `crates/motif-core/src/config.rs:31-39`;
   `MOTIF.md` decision 4.
+- `[scope]` **`[capability]` reports deterministic facts only.** No
+  qualitative labels ("medium", "sufficient") — just numbers and well-
+  defined enums. Motif reports facts; controller (or host) decides
+  what counts as enough. v0.0.2 lands the section; auto-discovery is
+  v0.0.3+.
+  *Source:* `motif.toml.example`; `MOTIF.md` decision 20.
+- `[scope]` **`[edge]` knobs are first-class for both strategies.**
+  `edge-is-tiny` (cache + foreshadow) and `edge-is-free` (local
+  execution) are both supported via configuration. Motif itself picks
+  no strategy.
+  *Source:* `motif.toml.example`; `MOTIF.md` decisions 21.
 - `[gap]` **Only `ControllerKind::InMemory` parses.** TOML rejects
-  `kind = "surreal"` or anything else. The enum gains variants when
-  v0.0.2 wires real transport.
+  `kind = "surreal"` or anything else. v0.0.2 drops the enum entirely
+  in favour of the abstract `Controller` trait + bridge crates.
   *Source:* `crates/motif-core/src/config.rs:53-56`.
 
 ## Storage (`motif-core::storage`, `motif-core::record`)
@@ -125,6 +136,15 @@ pass can grep its way to the source.
   plan. Reassessed once exit criteria are met.
   *Source:* `crates/motif-core/src/query/mod.rs:1-40`;
   `MOTIF.md` decision 11.
+- `[scope]` **Cypher only.** No SurrealQL or other-dialect translators
+  inside Motif. Translators (if anyone wants them) live in optional
+  bridge / hub crates.
+  *Source:* `MOTIF.md` decision 11.
+- `[scope]` **Metadata is queryable as data.** v0.0.2 exposes
+  foreshadow flags, override history, and the capability profile via
+  Cypher tables (`MATCH (n) WHERE n._motif.foreshadow = true RETURN n`)
+  rather than a separate state-inspection API. No parallel vocabulary.
+  *Source:* `MOTIF.md` decision 19.
 - `[scope]` **Single bound variable per statement.** No
   `MATCH (a)-[r]->(b)`, no multi-pattern, no `WITH`, no
   `OPTIONAL MATCH`.
@@ -177,9 +197,26 @@ pass can grep its way to the source.
 
 ## Sync layer (`motif-core::sync`)
 
+- `[scope]` **Bridges architecture: motif-core never bundles a
+  controller transport.** The `Controller` trait (lands in v0.0.2) is
+  the only seam. Concrete transports — `motif-surreal-bridge`,
+  `motif-supabase-bridge`, etc. — ship as optional separate crates
+  under `bridges/` (or separate repos). `cargo tree -p motif-core`
+  must show no network deps. Likewise host-side event/MCP layers live
+  in `hubs/` (`motif-hub` etc.).
+  *Source:* `MOTIF.md` decisions 3, 18.
+- `[scope]` **Foreshadow semantics.** v0.0.2 adds a `foreshadow: bool`
+  flag on `Mutation` to mark "applied locally, not yet confirmed."
+  Server-wins resolution flips the flag or evicts the record.
+  Foreshadow is transparent to query semantics unless the caller
+  explicitly queries metadata.
+  *Source:* `MOTIF.md` decision 5.
 - `[gap]` **No transport.** Only `InMemoryControllerClient` exists.
-  Real SurrealDB transport (probably WS or HTTP) is v0.0.2.
-  *Source:* `crates/motif-core/src/sync/controller_client.rs:1-7`.
+  v0.0.2 lands the abstract `Controller` trait + thread-per-controller
+  worker; concrete bridges (e.g. `motif-surreal-bridge`) ship outside
+  motif-core.
+  *Source:* `crates/motif-core/src/sync/controller_client.rs:1-7`;
+  `MOTIF.md` decision 18.
 - `[gap]` **`MutationLog` is in-process only.** Crash-safe persisted
   log alongside storage is v0.0.2. Until then, queued mutations are
   lost on restart.
@@ -261,6 +298,14 @@ pass can grep its way to the source.
 
 ## Operations / observability
 
+- `[scope]` **Test profiles: `default` / `potato` / `hoverphone`.**
+  Timing-sensitive integration tests (schema race, reconnect replay,
+  contention) must pass on all three. `potato` injects artificial
+  slowness (low-throughput storage I/O, tight RAM, capped threads);
+  `hoverphone` injects artificial speed / unusual timing. Keeps the
+  system honest against both edge-is-tiny hardware and edge-is-free
+  acceleration.
+  *Source:* `MOTIF.md` decision 22; harness lands in v0.0.2-alpha.4.
 - `[scope]` **No metrics, no tracing.** No `tracing` crate, no
   counters, no spans. Logs go to nowhere. Adding `tracing` (with a
   no-op default subscriber) is a v0.0.2 chore — keeps `motif-core`
@@ -280,9 +325,12 @@ pass can grep its way to the source.
   `bincode`. Storage layer must not bake in plaintext-only
   assumptions; revisit when the per-device-key flow lands.
   *Source:* `MOTIF.md` decision 13.
-- `[scope]` **No auth signing on mutations.** `ActorId` is opaque
-  strings; the controller is expected to validate, but there is no
-  controller. JWT / per-device-key signing is v0.0.2.
+- `[scope]` **Motif compares opaque tokens, doesn't validate them.**
+  Per MOTIF.md decision 4 (refined for v0.0.2), Motif takes opaque
+  tokens from the host and opaque keys from the controller and checks
+  they match — no JWT validation chain inside motif-core. Real auth
+  flow ownership is host (token issuance) + controller (key issuance);
+  motif is the comparison point.
   *Source:* `crates/motif-core/src/sync/mutation.rs:7-15`;
   `MOTIF.md` decision 4.
 - `[scope]` **`unsafe_code = "forbid"`** at the workspace level. This
