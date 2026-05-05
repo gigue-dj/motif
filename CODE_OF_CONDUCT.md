@@ -1,6 +1,6 @@
 # Code of conduct
 
-Motif is developed publicly by gigue-dj and contributors, dual-licensed under
+Motif is developed publicly by Gigue Inc. and contributors, dual-licensed under
 MIT or Apache-2.0. We encourage everyone to open issues and discussions
 related to Motif and to be respectful, polite, and avoid hurtful language in
 any form.
