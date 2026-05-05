@@ -1,0 +1,20 @@
+[package]
+name = "motif-wasm"
+description = "Motif WASM bindings (wasm32-unknown-unknown). Stub in v0.0.1-alpha.2."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+motif-core = { workspace = true }
+wasm-bindgen = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

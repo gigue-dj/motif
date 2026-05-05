@@ -1,0 +1,94 @@
+name: rust
+
+on:
+  push:
+    branches:
+      - master
+      - 'claude/**'
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/rust.yml'
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/rust.yml'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: fmt + clippy + test (native)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
+
+  wasm-build:
+    name: cargo build + wasm-opt + size budget
+    runs-on: ubuntu-latest
+    env:
+      # v0.0.1 exit criterion 6: <2 MB after wasm-opt -Oz.
+      WASM_SIZE_BUDGET_BYTES: 2097152
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm
+
+      - name: Install binaryen (for wasm-opt)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binaryen
+          wasm-opt --version
+
+      - name: cargo build (wasm32-unknown-unknown)
+        run: cargo build --release --target wasm32-unknown-unknown -p motif-wasm
+
+      - name: wasm-opt -Oz
+        run: |
+          IN=target/wasm32-unknown-unknown/release/motif_wasm.wasm
+          OUT=target/wasm32-unknown-unknown/release/motif_wasm.opt.wasm
+          wasm-opt -Oz "$IN" -o "$OUT"
+          ls -l "$IN" "$OUT"
+
+      - name: Enforce size budget
+        run: |
+          SIZE=$(stat -c%s target/wasm32-unknown-unknown/release/motif_wasm.opt.wasm)
+          echo "optimised wasm size: $SIZE bytes (budget $WASM_SIZE_BUDGET_BYTES)"
+          if [ "$SIZE" -gt "$WASM_SIZE_BUDGET_BYTES" ]; then
+            echo "FAIL: motif_wasm.opt.wasm exceeds size budget"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: motif-wasm
+          path: target/wasm32-unknown-unknown/release/motif_wasm.opt.wasm
