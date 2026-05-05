@@ -2,9 +2,10 @@
 
 This file is a **running ledger of every caveat we are knowingly building
 in**. It is an audit aid, not a spec — `MOTIF.md` is the spec. The ledger
-exists so that the pre-v0.0.1 review pass (CodeRabbit + a manual sweep) has
-a single place to attack, and so anyone reading the codebase can tell at a
-glance which "TODO"-shaped silences in code are tracked vs. forgotten.
+exists so that the audit pass between releases (CodeRabbit + a manual
+sweep, performed for v0.0.1 in PR #1) has a single place to attack, and so
+anyone reading the codebase can tell at a glance which "TODO"-shaped
+silences in code are tracked vs. forgotten.
 
 > **Scope:** this file is documentation only and is not compiled into the
 > WASM artifact or any crate. Update it whenever an alpha lands; prune it
@@ -14,8 +15,8 @@ glance which "TODO"-shaped silences in code are tracked vs. forgotten.
 
 - `[scope]` — intentional MVP cut. Will not change before v0.0.1; may or
   may not change in v0.0.2+.
-- `[gap]` — known missing functionality that a later v0.0.1 alpha (3–5)
-  will fill.
+- `[gap]` — known missing functionality that a later release will fill
+  (within the current minor for in-flight work, or in a future minor).
 - `[debt]` — known imperfection in shipped code. Flagged for the
   pre-v0.0.1 audit pass; may demand a fix or an explicit accept.
 - `[perf]` — performance compromise that is acceptable at current scale
@@ -109,6 +110,13 @@ pass can grep its way to the source.
   `Null`, `Bool`, `I64`, `F64`, `String`. No timestamps, no blobs, no
   lists, no nested structs. Expanded when the query layer needs more.
   *Source:* `crates/motif-core/src/value.rs:1-13`.
+- `[debt]` **`Storage::truncate` does not enforce
+  `new_len >= HEADER_LEN`.** No reachable caller violates this today
+  (recovery initialises `last_good = HEADER_LEN`), but a defensive guard
+  prevents future misuse from corrupting the magic. ~3-line add when
+  v0.0.2 touches the storage layer.
+  *Source:* `crates/motif-core/src/storage.rs` (`FileStorage::truncate`,
+  `MemoryStorage::truncate`). Logged from PR #1 review (finding 6).
 
 ## Query (`motif-core::query`)
 
@@ -154,6 +162,18 @@ pass can grep its way to the source.
   pass should decide whether the interpreter rejects the query when
   edges reference the doomed node.
   *Source:* `crates/motif-core/src/query/interpreter.rs:143-160`.
+- `[perf]` **`extract_id_predicate` only matches a top-level
+  `id(n) = X`.** `MATCH (n) WHERE id(n) = $x AND n.foo = 1` falls back
+  to a full `iter_nodes()` scan instead of a constant-time index
+  lookup + secondary filter. v0.0.2 fix is to walk an `AND` chain for
+  the predicate; trivial change once a Conjunction normaliser exists.
+  *Source:* `crates/motif-core/src/query/interpreter.rs:216-241`.
+  Logged from PR #1 review (finding 4).
+- `[scope]` **No unary minus expression form.** `-10` parses as the
+  literal `Integer(-10)`; `-n.balance` does not parse. Acceptable for
+  v0.0.1; trivial to add when the expression layer grows arithmetic.
+  *Source:* `crates/motif-core/src/query/lexer.rs` (`scan_number`
+  entry path). Logged from PR #1 review (finding 5).
 
 ## Sync layer (`motif-core::sync`)
 
@@ -182,6 +202,29 @@ pass can grep its way to the source.
   serialized engine records verbatim. Structured diffs for the
   controller arrive when the SurrealQL boundary lands.
   *Source:* `crates/motif-core/src/sync/mutation.rs:1-3`.
+- `[debt]` **`wal_payload` shape is asymmetric across inserts and
+  deletes.** Inserts ship `&frame[LEN_PREFIX_BYTES..]` (bincode-encoded
+  `Record::*Insert`); deletes ship `id.as_bytes()` (raw UTF-8, not
+  valid bincode for a `String`). When the controller transport lands
+  in v0.0.2 the consumer would have to branch on `kind` to decode. A
+  uniform "always bincode of `Record::*`" shape is one small change.
+  *Source:* `crates/motif-core/src/engine.rs` `delete_node:272`,
+  `delete_edge:284`. Logged from PR #1 review (finding 2).
+- `[debt]` **Naming inconsistency: `MutationKind::RelInsert` /
+  `RelDelete` vs `Record::EdgeInsert` / `EdgeDelete`.** Sync layer
+  uses Cypher-conventional `Rel`; storage layer uses `Edge`. Internal
+  only today (the inconsistency never leaves the crate). v0.0.2
+  should pick one once the controller wire format is real.
+  *Source:* `crates/motif-core/src/sync/mutation.rs:18-26`,
+  `crates/motif-core/src/record.rs:21-25`. Logged from PR #1 review
+  (finding 1).
+- `[debt]` **`MutationLog::record` uses `.expect("poisoned")` on the
+  mutex.** Single-threaded today; if a future alpha adds parallel
+  writers, a panic on a previous lock holder propagates. Either keep
+  the panic (single-writer is the documented model) or switch to
+  `lock().unwrap_or_else(|e| e.into_inner())` for poison recovery.
+  *Source:* `crates/motif-core/src/sync/mutation_log.rs`. Logged from
+  PR #1 review (finding 7).
 - `[gap]` **No provisional / CRDT shadow layer.** Server-wins is the
   decision; the local-temp-override mechanism is a v0.0.2 design
   item.
@@ -258,14 +301,17 @@ pass can grep its way to the source.
 
 ## Audit cadence
 
-Between the final alpha and v0.0.1 release we run a single combined pass:
+Between the final alpha of a release and the release tag we run a single
+combined pass:
 
-1. **CodeRabbit** on the full diff from `master` to the v0.0.1-rc tag.
+1. **CodeRabbit** on the full diff from the prior release to the new
+   release-candidate tag.
 2. **Manual sweep** against this file: every `[debt]` either gets a fix
    commit or an explicit accept (with the reason added in-line below the
    item).
-3. **`[scope]` items are reviewed but not changed** unless the user
-   explicitly opens a v0.0.1-blocking issue.
+3. **`[scope]` items are reviewed but not changed** unless the maintainer
+   explicitly opens a release-blocking issue.
 
-The goal is to enter v0.0.1 with the `[debt]` set empty, the `[gap]` set
-empty, and the `[scope]` set knowingly accepted.
+The v0.0.1 audit pass happened in PR #1; findings 1, 2, 4, 5, 6, 7 from
+that review were accepted as deferrable and are tagged in this file as the
+v0.0.2 backlog. The same cadence applies between v0.0.1 and v0.0.2.
