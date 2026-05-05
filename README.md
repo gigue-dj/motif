@@ -2,9 +2,9 @@
 
 **Motif** is a tiny, embedded follower graph store. It targets Swift and Rust application codebases on mobile and edge, with integrity outsourced to an upstream controller database (SurrealDB today, a custom Nebula-class controller later).
 
-> **Status:** v0.0.1-alpha.4 — engine + query layer green, sync transport pending. The repo is mid-pivot from a C++ Kuzu fork to a greenfield Rust implementation. See [`MOTIF.md`](./MOTIF.md) for the design rationale and milestone plan, and [`LIMITATIONS.md`](./LIMITATIONS.md) for the running ledger of known caveats.
+> **Status:** **v0.0.1 shipped.** Engine, query layer, sync skeleton, and wasm bindings all green. SurrealDB controller transport, host-provided wasm storage, and provisional-write semantics arrive in v0.0.2. See [`MOTIF.md`](./MOTIF.md) for the design rationale and milestone plan, and [`LIMITATIONS.md`](./LIMITATIONS.md) for the running ledger of known caveats.
 >
-> - **`cpp-reference/`** — alpha.1 C++ tree, scoped down from upstream Kuzu. Frozen reference; not the shipping artifact. Will be archived once v0.0.1 ships.
+> - **`cpp-reference/`** — alpha.1 C++ tree, scoped down from upstream Kuzu. Frozen reference; not the shipping artifact. Retains its original [Kuzu MIT license](./cpp-reference/LICENSE-MIT-KUZU). Will be archived (separate tag / repo) post-v0.0.1.
 > - **Top level** — Rust workspace (`crates/motif-core`, `crates/motif-wasm`, `crates/motif-cli`).
 
 ## Architecture in one paragraph
@@ -25,8 +25,12 @@ Rust workspace and `wasm32-unknown-unknown` build instructions land in alpha.2. 
 
 ## Provenance
 
-The frozen C++ reference under `cpp-reference/` is derived from [Kuzu](https://github.com/kuzudb/kuzu/) (MIT). Upstream Kuzu has been archived. The Rust port is greenfield code informed by the C++ baseline as a behavioural spec.
+The frozen C++ reference under `cpp-reference/` is derived from [Kuzu](https://github.com/kuzudb/kuzu/) (MIT, Copyright (c) 2022-2025 Kùzu Inc.). Upstream Kuzu has been archived. The Rust crates at the top level are greenfield code informed by the C++ baseline as a behavioural spec.
 
 ## License
 
-Dual-licensed under MIT or Apache-2.0 at the user's option — matches Rust crates.io convention. See [LICENSE](./LICENSE) (current MIT inherited from Kuzu; Apache-2.0 will be added in alpha.2).
+Dual-licensed under MIT or Apache-2.0 at your option — matches Rust crates.io convention.
+
+- [`LICENSE-MIT`](./LICENSE-MIT) — Motif (Copyright (c) 2026 gigue-dj and Motif Contributors).
+- [`LICENSE-APACHE`](./LICENSE-APACHE) — Motif Apache-2.0 grant.
+- [`cpp-reference/LICENSE-MIT-KUZU`](./cpp-reference/LICENSE-MIT-KUZU) — original Kuzu MIT covering the code under `cpp-reference/`.

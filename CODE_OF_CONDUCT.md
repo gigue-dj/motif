@@ -1,9 +1,15 @@
-Kuzu is being developed publicly by Kùzu Inc., under an MIT license in this GitHub repo. We encourage everyone
-to open issues and discuss topics only related to Kuzu. We also kindly ask everyone to be
-respectful, polite and avoid any hurtful language in any form.
-Kùzu Inc. is a startup based in Canada 🇨🇦, a land that is proud of their high standards
-for politeness and where a person you bumped into on the road will likely
-apologize to you even if it was your fault: so, again, we ask you to please be
-kind and respectful to everyone on this GitHub.
-If you prefer not to discuss something through open issues and discussions,
-you can always reach us through [email](mailto:contact@kuzudb.com).
+# Code of conduct
+
+Motif is developed publicly by Gigue Inc. and contributors, dual-licensed under
+MIT or Apache-2.0. We encourage everyone to open issues and discussions
+related to Motif and to be respectful, polite, and avoid hurtful language in
+any form.
+
+If you prefer not to discuss something through public issues, you can reach
+the maintainers via the contact information in the repository's GitHub
+profile.
+
+The Motif Rust port is informed by Kuzu (https://github.com/kuzudb/kuzu/) as
+a behavioural reference; the frozen C++ tree under `cpp-reference/` retains
+the upstream Kuzu code of conduct in spirit (mutual respect, kindness, and
+the assumption of good faith from everyone).
