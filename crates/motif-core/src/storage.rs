@@ -19,13 +19,18 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 pub(crate) const MAGIC: &[u8; 8] = b"MOTIF\0\0\x01";
-/// On-disk format version. v0.0.2-alpha.1 bumped this from 1 to 2 when
-/// the on-disk record collapsed from `Record::*` enum variants into a
-/// single `Mutation` shape (the persisted MutationLog and the storage
-/// log are now the same structure). v0.0.1 stores are rejected at open
-/// time with [`StorageError::BadVersion`] — no migration tooling per
-/// the "bleeding-edge until outside contributors arrive" decision.
-pub(crate) const FORMAT_VERSION: u32 = 2;
+/// On-disk format version. Bumps:
+/// - 1 → 2 in v0.0.2-alpha.1: the on-disk record collapsed from
+///   `Record::*` enum variants into a single `Mutation` shape.
+/// - 2 → 3 in v0.0.2-alpha.3: `MutationOp` gained `SchemaApply(Schema)`.
+///   Existing variant tags 0-3 are unchanged, but stores that contain
+///   a tag-4 record cannot be decoded by alpha.2 binaries — bumping
+///   the format version makes that incompatibility explicit.
+///
+/// Older stores are rejected at open with `StorageError::BadVersion` —
+/// no migration tooling per the "bleeding-edge until outside contributors
+/// arrive" decision.
+pub(crate) const FORMAT_VERSION: u32 = 3;
 pub(crate) const HEADER_LEN: u64 = 16;
 
 #[derive(Debug, thiserror::Error)]

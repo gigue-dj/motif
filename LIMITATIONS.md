@@ -38,10 +38,19 @@ pass can grep its way to the source.
 > in-memory MutationLog `[gap]` is also retired — the worker
 > consumes the log on its own thread (native) or microtask (wasm).
 >
+> **v0.0.2-alpha.3 added:** schema push (controller-pushed `Schema` via
+> `MutationOp::SchemaApply`); engine validates labels against the
+> current schema; `_motif.schema.version` resolves via the metadata-as-
+> data Cypher namespace. Format version bumped to `3`. New scope items
+> for std::thread default + future Spawner trait, feature-flagged
+> InMemoryController, and unvalidated `controller.kind` (slated for
+> with_named_controller in alpha.5).
+>
 > Still on the backlog below: PR #1 findings 4 (id-predicate inside AND
 > chain), 5 (unary minus), 6 (`Storage::truncate` header guard), 7
-> (`MutationLog::record` poison-mutex). New v0.0.2 debt: WASM size
-> jump from the wasm-worker deps; no reconnect / offline-replay yet.
+> (`MutationLog::record` poison-mutex). v0.0.2 debt: WASM size jump
+> from the wasm-worker deps; no reconnect / offline-replay yet;
+> unvalidated `controller.kind`.
 
 ---
 
@@ -92,6 +101,16 @@ pass can grep its way to the source.
   bridge crate (or the host) interprets the string; conventional
   values are documented in `motif.toml.example`.
   *Source:* `crates/motif-core/src/config.rs` (`ControllerConfig`).
+- `[debt]` **`controller.kind` is unvalidated.** Motif-core silently
+  ignores typos (`kind = "in-mmemoy"` parses cleanly); only host /
+  bridge code can catch the mismatch. v0.0.2-alpha.5 audit pass adds
+  `Engine::with_named_controller(c, kind: &str)` that asserts the
+  wired controller's kind matches the config's, surfacing a
+  `ControllerKindMismatch` error. Until then, `kind` is purely
+  informational and silent typos are a real bug class — bridge crates
+  should validate against their known set.
+  *Source:* `crates/motif-core/src/config.rs` (`ControllerConfig`);
+  `MOTIF.md` decision 18.
 
 ## Storage (`motif-core::storage`, `motif-core::record`)
 
@@ -253,6 +272,27 @@ pass can grep its way to the source.
   v0.0.2-alpha.4.
   *Source:* `crates/motif-core/src/sync/worker.rs`; `MOTIF.md`
   alpha.4 milestone.
+- `[scope]` **`std::thread` is the default spawner; no host-provided
+  alternative.** Native targets — including the future
+  `aarch64-apple-ios` / `aarch64-linux-android` builds — use Rust's
+  stdlib `std::thread::spawn` with `std::sync::mpsc::channel`. This
+  works correctly on both iOS and Android (pthreads under the hood)
+  but is not the preferred concurrency primitive on either (iOS GCD,
+  Android coroutines). v0.0.3+ should add a `Spawner` trait so hosts
+  can opt into their platform's preferred runtime; the default
+  std::thread impl stays for simplicity and portability. **Do not
+  introduce target-specific runtime assumptions in motif-core** —
+  contributors adding a tokio reactor or similar would break this
+  composability.
+  *Source:* `crates/motif-core/src/sync/worker.rs`; `MOTIF.md`
+  decision 12.
+- `[scope]` **`InMemoryController` is feature-flagged (default-on).**
+  Gated behind the `in-memory-controller` Cargo feature. Production
+  builds wiring a real `motif-*-bridge` controller can drop it via
+  `default-features = false`. Tests, the dev CLI, and hosts that don't
+  need controller integration keep the default.
+  *Source:* `crates/motif-core/Cargo.toml` (`[features]`);
+  `crates/motif-core/src/sync/controller.rs`.
 - `[debt]` **Tee fires after the storage append but before the index
   publishes for inserts.** A panic between those two steps would leave
   a record on disk that subsequent recovery picks up, with the

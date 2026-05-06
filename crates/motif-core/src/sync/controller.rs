@@ -10,6 +10,7 @@
 //! for the spawning code. `apply` therefore takes `&mut self` — the
 //! controller is owned exclusively by the worker.
 
+#[cfg(feature = "in-memory-controller")]
 use std::sync::Mutex;
 
 use super::Mutation;
@@ -38,16 +39,23 @@ pub trait Controller: Send + 'static {
 /// The handle is `Clone + Send + Sync` so test code can hand it to the
 /// engine (which takes ownership of the controller) and still inspect
 /// results from the test thread.
+///
+/// Gated behind the `in-memory-controller` feature (default-on) so
+/// production builds that wire a real bridge can drop this code via
+/// `default-features = false`.
+#[cfg(feature = "in-memory-controller")]
 #[derive(Debug, Default)]
 pub struct InMemoryController {
     handle: InMemoryHandle,
 }
 
+#[cfg(feature = "in-memory-controller")]
 #[derive(Clone, Debug, Default)]
 pub struct InMemoryHandle {
     state: std::sync::Arc<Mutex<Vec<Mutation>>>,
 }
 
+#[cfg(feature = "in-memory-controller")]
 impl InMemoryHandle {
     /// Snapshot the mutations the worker has applied so far.
     pub fn snapshot(&self) -> Vec<Mutation> {
@@ -94,6 +102,7 @@ impl InMemoryHandle {
     }
 }
 
+#[cfg(feature = "in-memory-controller")]
 impl InMemoryController {
     pub fn new() -> Self {
         Self::default()
@@ -106,13 +115,14 @@ impl InMemoryController {
     }
 }
 
+#[cfg(feature = "in-memory-controller")]
 impl Controller for InMemoryController {
     fn apply(&mut self, m: Mutation) {
         self.handle.state.lock().expect("poisoned").push(m);
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "in-memory-controller"))]
 mod tests {
     use super::super::{ActorId, MutationOp};
     use super::*;

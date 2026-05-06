@@ -318,8 +318,10 @@ fn eval_expr(
 }
 
 /// Resolve a property path against a bound node. Single-segment paths
-/// hit the node's user properties; `_motif.X` paths hit the metadata
-/// namespace (engine state).
+/// hit the node's user properties; `_motif.<rest>` paths hit the
+/// metadata-as-data namespace (engine state). Arbitrary-depth paths
+/// are allowed only inside the `_motif` namespace; user-property
+/// nesting (`n.address.city`) is a v0.0.3+ shape.
 fn resolve_property_path(
     node: &Node,
     path: &[String],
@@ -327,19 +329,20 @@ fn resolve_property_path(
 ) -> Result<Value, InterpretError> {
     match path {
         [key] => Ok(node.properties.get(key).cloned().unwrap_or(Value::Null)),
-        [namespace, key] if namespace == "_motif" => Ok(motif_metadata(node, key, engine)),
-        _ => {
-            let joined = path.join(".");
-            Err(InterpretError::NestedPath(joined))
-        }
+        [namespace, rest @ ..] if namespace == "_motif" => Ok(motif_metadata(node, rest, engine)),
+        _ => Err(InterpretError::NestedPath(path.join("."))),
     }
 }
 
-/// `_motif.X` lookups. Unknown keys return `Value::Null` rather than an
-/// error so hosts can probe the namespace forward-compatibly.
-fn motif_metadata(node: &Node, key: &str, engine: &Engine) -> Value {
-    match key {
-        "foreshadow" => Value::Bool(engine.is_foreshadow(&node.id)),
+/// `_motif.<...>` lookups. Unknown keys return `Value::Null` rather
+/// than an error so hosts can probe the namespace forward-compatibly.
+fn motif_metadata(node: &Node, path: &[String], engine: &Engine) -> Value {
+    match path {
+        [k] if k == "foreshadow" => Value::Bool(engine.is_foreshadow(&node.id)),
+        [a, b] if a == "schema" && b == "version" => engine
+            .current_schema()
+            .map(|s| Value::I64(s.version as i64))
+            .unwrap_or(Value::Null),
         _ => Value::Null,
     }
 }
