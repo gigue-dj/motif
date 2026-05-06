@@ -1,16 +1,23 @@
 //! `MutationLog` is the in-memory bridge between an engine commit and a
-//! wired [`ControllerClient`]. It either forwards mutations to a wired
-//! client or buffers them until one is wired.
+//! controller worker. v0.0.2-alpha.2 reworks this into a forwarder
+//! abstraction: when no forwarder is wired, `record()` buffers in
+//! memory; when one is wired (typically a channel sender installed by
+//! the worker), `record()` invokes it directly. The worker thread on
+//! the other end of the channel calls `Controller::apply` outside the
+//! engine's commit path, keeping commit latency low.
 //!
-//! As of v0.0.2-alpha.1, `local_seq` is assigned by the engine before
-//! `record()` is called — the engine owns sequence numbering because
-//! the on-disk Mutation log (which IS the persisted source of truth)
-//! must agree with what the controller eventually sees. The MutationLog
-//! is now purely an in-memory FIFO for the controller worker.
+//! `local_seq` is assigned by the engine before `record()` is called —
+//! the engine owns sequence numbering because the on-disk Mutation log
+//! (the persisted source of truth) must agree with what the controller
+//! eventually sees.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
-use super::{ControllerClient, Mutation};
+use super::Mutation;
+
+/// Forwarder closure type. Captures whatever channel sender the worker
+/// uses on this target.
+type Forwarder = Box<dyn Fn(Mutation) + Send + Sync>;
 
 #[derive(Default)]
 pub struct MutationLog {
@@ -20,7 +27,7 @@ pub struct MutationLog {
 #[derive(Default)]
 struct Inner {
     buffer: Vec<Mutation>,
-    client: Option<Arc<dyn ControllerClient>>,
+    forwarder: Option<Forwarder>,
 }
 
 impl MutationLog {
@@ -28,29 +35,33 @@ impl MutationLog {
         Self::default()
     }
 
-    /// Record an already-sequenced mutation. The caller is expected to
-    /// have assigned `local_seq`; we don't touch it. If a client is
-    /// wired, the mutation is forwarded under the lock so per-mutation
-    /// order matches the `local_seq` order observed by the client.
+    /// Record an already-sequenced mutation. If a forwarder is wired,
+    /// the mutation goes through it; otherwise it lands in the in-memory
+    /// buffer (which tests / startup-replay code can drain).
     pub fn record(&self, m: Mutation) {
         let mut g = self.inner.lock().expect("poisoned");
-        match g.client.clone() {
-            Some(client) => client.apply_mutation(m),
+        match &g.forwarder {
+            Some(f) => f(m),
             None => g.buffer.push(m),
         }
     }
 
-    /// Wire a client. Pre-buffered mutations are NOT replayed
-    /// automatically — the caller chooses whether to drain them via
-    /// `take_buffer` and re-apply.
-    pub fn set_client(&self, client: Arc<dyn ControllerClient>) {
-        let mut g = self.inner.lock().expect("poisoned");
-        g.client = Some(client);
+    /// Wire a forwarder. Pre-buffered mutations are NOT replayed — the
+    /// caller chooses whether to drain them via `take_buffer` and
+    /// re-apply.
+    pub fn set_forwarder(&self, f: Forwarder) {
+        self.inner.lock().expect("poisoned").forwarder = Some(f);
+    }
+
+    /// True iff a forwarder is currently wired. Useful for tests that
+    /// want to assert the worker spawned successfully.
+    pub fn has_forwarder(&self) -> bool {
+        self.inner.lock().expect("poisoned").forwarder.is_some()
     }
 
     /// Take everything currently buffered. Used by tests and by the
-    /// alpha.2 reconnect path that replays buffered mutations after
-    /// the controller worker comes back online.
+    /// alpha.4 reconnect path that replays buffered mutations after the
+    /// controller worker comes back online.
     pub fn take_buffer(&self) -> Vec<Mutation> {
         let mut g = self.inner.lock().expect("poisoned");
         std::mem::take(&mut g.buffer)
@@ -63,7 +74,9 @@ impl MutationLog {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{ActorId, InMemoryControllerClient, MutationOp};
+    use std::sync::Arc;
+
+    use super::super::{ActorId, MutationOp};
     use super::*;
     use crate::graph::Node;
 
@@ -80,7 +93,7 @@ mod tests {
     }
 
     #[test]
-    fn buffers_when_no_client_wired() {
+    fn buffers_when_no_forwarder_wired() {
         let log = MutationLog::new();
         log.record(sample(1, MutationOp::NodeInsert(Node::new("a", "T"))));
         log.record(sample(2, MutationOp::NodeInsert(Node::new("b", "T"))));
@@ -91,31 +104,56 @@ mod tests {
     }
 
     #[test]
-    fn forwards_to_client_when_wired() {
-        let client = Arc::new(InMemoryControllerClient::new());
+    fn forwards_through_closure_when_wired() {
+        let received: Arc<Mutex<Vec<Mutation>>> = Arc::default();
+        let received_clone = Arc::clone(&received);
         let log = MutationLog::new();
-        log.set_client(client.clone());
+        log.set_forwarder(Box::new(move |m| {
+            received_clone.lock().unwrap().push(m);
+        }));
+
         log.record(sample(1, MutationOp::NodeInsert(Node::new("a", "T"))));
         log.record(sample(
             2,
             MutationOp::EdgeInsert(crate::graph::Edge::new("e", "F", "a", "a")),
         ));
+
+        let got = received.lock().unwrap().clone();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].local_seq, 1);
+        assert_eq!(got[1].local_seq, 2);
         assert_eq!(log.buffered_len(), 0);
-        let received = client.drain();
-        assert_eq!(received.len(), 2);
-        assert_eq!(received[0].local_seq, 1);
-        assert_eq!(received[1].local_seq, 2);
     }
 
     #[test]
-    fn does_not_renumber_after_wiring() {
+    fn pre_existing_buffer_is_not_drained_on_wire() {
         let log = MutationLog::new();
         log.record(sample(1, MutationOp::NodeInsert(Node::new("a", "T"))));
-        let client = Arc::new(InMemoryControllerClient::new());
-        log.set_client(client.clone());
+
+        let received: Arc<Mutex<Vec<Mutation>>> = Arc::default();
+        let received_clone = Arc::clone(&received);
+        log.set_forwarder(Box::new(move |m| {
+            received_clone.lock().unwrap().push(m);
+        }));
+
         log.record(sample(2, MutationOp::NodeInsert(Node::new("b", "T"))));
+
+        // Only the post-wire mutation reached the forwarder.
+        let got = received.lock().unwrap().clone();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].local_seq, 2);
+
+        // The pre-wire mutation is still buffered.
         assert_eq!(log.buffered_len(), 1);
-        assert_eq!(client.len(), 1);
-        assert_eq!(client.drain()[0].local_seq, 2);
+        let drained = log.take_buffer();
+        assert_eq!(drained[0].local_seq, 1);
+    }
+
+    #[test]
+    fn has_forwarder_reflects_state() {
+        let log = MutationLog::new();
+        assert!(!log.has_forwarder());
+        log.set_forwarder(Box::new(|_| {}));
+        assert!(log.has_forwarder());
     }
 }

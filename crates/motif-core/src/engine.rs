@@ -125,9 +125,29 @@ impl Engine {
         Ok(engine)
     }
 
-    /// Wire an in-memory [`MutationLog`]. v0.0.2-alpha.1 records into it
-    /// on every commit; alpha.2 will let the Controller worker drain it.
+    /// Wire an in-memory [`MutationLog`] for callers that want to
+    /// install their own forwarder (rare — most callers should use
+    /// [`Engine::with_controller`] instead, which handles MutationLog
+    /// + worker spawning together).
     pub fn with_mutation_log(mut self, log: Arc<MutationLog>) -> Self {
+        self.mutation_log = Some(log);
+        self
+    }
+
+    /// Wire a [`Controller`]. The engine creates an internal
+    /// [`MutationLog`] and spawns a worker that drains it into the
+    /// controller (one thread on native, one
+    /// `wasm-bindgen-futures::spawn_local` task on wasm). Subsequent
+    /// commits enqueue mutations onto the worker's channel and return
+    /// without waiting for `Controller::apply`.
+    ///
+    /// The returned engine retains a handle to its MutationLog (for
+    /// `mutation_count` diagnostics on the wasm path); the worker
+    /// itself is detached. Drop the engine to drop the channel sender,
+    /// which causes the worker to flush and exit.
+    pub fn with_controller<C: crate::sync::Controller>(mut self, controller: C) -> Self {
+        let log = Arc::new(MutationLog::new());
+        let _handle = crate::sync::spawn_controller_worker(&log, controller);
         self.mutation_log = Some(log);
         self
     }
@@ -135,6 +155,16 @@ impl Engine {
     /// Test/inspection helper: read the current actor identity.
     pub fn actor(&self) -> &ActorId {
         &self.actor
+    }
+
+    /// Test/inspection helper: how many mutations are buffered in the
+    /// MutationLog (i.e. recorded but not yet forwarded to a worker).
+    /// Returns 0 if no MutationLog is wired.
+    pub fn buffered_mutation_count(&self) -> usize {
+        self.mutation_log
+            .as_ref()
+            .map(|l| l.buffered_len())
+            .unwrap_or(0)
     }
 
     /// Replay the log from the start, rebuilding the in-memory index
@@ -419,7 +449,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::config::{ControllerConfig, ControllerKind, IdentityConfig, StorageConfig};
+    use crate::config::{ControllerConfig, IdentityConfig, StorageConfig};
     use crate::value::Value;
 
     fn cfg() -> MotifConfig {
@@ -429,7 +459,7 @@ mod tests {
                 device_id: "d".into(),
             },
             controller: ControllerConfig {
-                kind: ControllerKind::InMemory,
+                kind: "in-memory".into(),
             },
             storage: StorageConfig {
                 path: PathBuf::from(":memory:"),

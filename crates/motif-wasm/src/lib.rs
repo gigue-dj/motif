@@ -1,12 +1,14 @@
 //! `motif-wasm` exposes `motif-core` to host languages via
-//! `wasm32-unknown-unknown` + `wasm-bindgen`. v0.0.1-alpha.5 ships the
-//! minimum surface needed by a Swift or Rust host to open a database
-//! and run queries:
+//! `wasm32-unknown-unknown` + `wasm-bindgen`. v0.0.2-alpha.2 wires an
+//! in-memory controller behind `Engine::with_controller`; on wasm the
+//! worker drains via `wasm-bindgen-futures::spawn_local` so the engine
+//! commit path stays low-latency.
 //!
 //! - [`Motif::open`] takes the same TOML config as the native API,
-//!   constructs an in-memory engine (the wasm32 target has no
-//!   filesystem; a host-provided storage shim is post-v0.0.1), and
-//!   wires an in-memory `MutationLog` so `mutation_count` is observable.
+//!   constructs an in-memory engine (no filesystem on `wasm32-unknown-
+//!   unknown`; host-provided storage shim is post-v0.0.2), wires an
+//!   `InMemoryController` via the worker so `controller_applied_count`
+//!   is observable from JS.
 //! - [`Motif::query`] takes a Cypher string and a JSON-encoded params
 //!   object, returns a JSON-encoded `QueryResult`.
 //!
@@ -14,9 +16,8 @@
 //! `Error` instances with a string message.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
-use motif_core::{Engine, MotifConfig, MutationLog, Params, Value};
+use motif_core::{Engine, InMemoryController, InMemoryHandle, MotifConfig, Params, Value};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -37,7 +38,7 @@ pub fn validate_config(toml_src: &str) -> Result<(), JsError> {
 #[wasm_bindgen]
 pub struct Motif {
     engine: Engine,
-    log: Arc<MutationLog>,
+    controller: InMemoryHandle,
 }
 
 #[wasm_bindgen]
@@ -48,11 +49,15 @@ impl Motif {
     #[wasm_bindgen(constructor)]
     pub fn open(toml_src: &str) -> Result<Motif, JsError> {
         let cfg = MotifConfig::from_toml_str(toml_src).map_err(to_js)?;
-        let log = Arc::new(MutationLog::new());
+        let controller = InMemoryController::new();
+        let handle = controller.handle();
         let engine = Engine::open_in_memory(&cfg)
             .map_err(to_js)?
-            .with_mutation_log(log.clone());
-        Ok(Motif { engine, log })
+            .with_controller(controller);
+        Ok(Motif {
+            engine,
+            controller: handle,
+        })
     }
 
     /// Run a query. `params_json` must be a JSON object mapping string
@@ -64,11 +69,15 @@ impl Motif {
         serde_json::to_string(&result).map_err(|e| JsError::new(&e.to_string()))
     }
 
-    /// Diagnostic: how many mutations have been queued for the
-    /// controller. Used by the alpha.5 architectural-validation test on
-    /// the host side.
-    pub fn mutation_count(&self) -> usize {
-        self.log.buffered_len()
+    /// Diagnostic: how many mutations the wasm controller worker has
+    /// applied so far. The wasm worker drains via
+    /// `wasm-bindgen-futures::spawn_local`; for hosts that need to
+    /// observe progress without yielding control, this count lags the
+    /// engine's commit count by however many mutations the microtask
+    /// queue has not yet drained. Yield to JS (`await Promise.resolve()`
+    /// or similar) before sampling for an up-to-date count.
+    pub fn controller_applied_count(&self) -> usize {
+        self.controller.len()
     }
 }
 

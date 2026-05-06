@@ -1,11 +1,18 @@
 //! Sync layer: the seam between Motif and the upstream controller.
-//! v0.0.2-alpha.1 collapses the old separate `Record` and `MutationKind`
-//! types into a unified [`Mutation`] / [`MutationOp`] shape.
+//!
+//! v0.0.2-alpha.2 reshaped this layer around the [`Controller`] trait
+//! plus a worker per controller (native `std::thread`, wasm
+//! `wasm-bindgen-futures`). The engine calls into [`MutationLog`] on
+//! commit; the log forwards via a channel sender to the worker; the
+//! worker calls `Controller::apply` on the other side. See
+//! `MOTIF.md` decisions 3, 12, 18.
 
-mod controller_client;
+mod controller;
 mod mutation;
 mod mutation_log;
+mod worker;
 
-pub use controller_client::{ControllerClient, InMemoryControllerClient};
+pub use controller::{Controller, InMemoryController, InMemoryHandle};
 pub use mutation::{ActorId, Mutation, MutationOp};
 pub use mutation_log::MutationLog;
+pub use worker::{spawn_controller_worker, WorkerHandle};
