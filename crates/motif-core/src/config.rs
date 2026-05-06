@@ -19,8 +19,7 @@ pub enum ConfigError {
 }
 
 /// Top-level Motif configuration. Loaded from a `motif.toml` file (or
-/// constructed in code for tests). All fields are required in v0.0.1 — we
-/// will introduce defaults only when we have a concrete reason to.
+/// constructed in code for tests).
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct MotifConfig {
     pub identity: IdentityConfig,
@@ -31,29 +30,35 @@ pub struct MotifConfig {
 /// Per-user + per-device identity. Both fields are mandatory: a compromised
 /// device must still be distinguishable from the same user on a different
 /// device, and the controller relies on the pair for audit and conflict
-/// resolution. Real auth tokens are out of scope for v0.0.1; these are
-/// opaque strings that the controller will validate later.
+/// resolution. Motif compares opaque tokens; the host owns the auth flow
+/// (MOTIF.md decision 4).
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct IdentityConfig {
     pub user_id: String,
     pub device_id: String,
 }
 
-/// Where Motif sends committed mutations. v0.0.1 only supports the
-/// `in-memory` controller — real SurrealDB transport lands in v0.0.2.
+/// Controller routing hint. v0.0.2-alpha.2 dropped the strongly-typed
+/// `ControllerKind` enum: motif-core is controller-agnostic
+/// (MOTIF.md decision 18) so a finite enum here would have to enumerate
+/// every bridge, which violates the OSS posture. `kind` is now an
+/// opaque string that the host's bridge crate (or `motif-cli` /
+/// `motif-wasm`) interprets.
+///
+/// Conventional values:
+/// - `"in-memory"` — the default `InMemoryController` shipped in
+///   motif-core; useful for tests, local development, and the alpha.2
+///   threading-model validation.
+/// - `"external"` — host wires its own [`crate::sync::Controller`]
+///   programmatically; motif-core does not auto-instantiate one.
+/// - `"<bridge-name>"` — interpreted by the corresponding bridge crate
+///   (e.g. `motif-surreal-bridge` looks for `kind = "surreal"`).
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ControllerConfig {
-    pub kind: ControllerKind,
+    pub kind: String,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum ControllerKind {
-    InMemory,
-}
-
-/// Where Motif's local single-file store lives. The actual storage engine
-/// lands in alpha.3; for alpha.2 this is just a validated path.
+/// Where Motif's local single-file store lives.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct StorageConfig {
     pub path: PathBuf,
@@ -73,10 +78,9 @@ impl MotifConfig {
         Self::from_toml_str(&body)
     }
 
-    /// Re-emit the config as TOML. Used for the `--print-config` round-trip
-    /// exit criterion.
+    /// Re-emit the config as TOML. Used for the `--print-config`
+    /// round-trip exit criterion.
     pub fn to_toml_string(&self) -> String {
-        // toml::to_string only fails on serializer bugs, not on our types.
         toml::to_string(self).expect("MotifConfig is always serializable")
     }
 }
@@ -102,7 +106,7 @@ mod tests {
         let cfg = MotifConfig::from_toml_str(SAMPLE).unwrap();
         assert_eq!(cfg.identity.user_id, "u_abc");
         assert_eq!(cfg.identity.device_id, "d_xyz");
-        assert_eq!(cfg.controller.kind, ControllerKind::InMemory);
+        assert_eq!(cfg.controller.kind, "in-memory");
         assert_eq!(cfg.storage.path, PathBuf::from("./motif.db"));
     }
 
@@ -112,6 +116,23 @@ mod tests {
         let emitted = cfg.to_toml_string();
         let reparsed = MotifConfig::from_toml_str(&emitted).unwrap();
         assert_eq!(cfg, reparsed);
+    }
+
+    #[test]
+    fn parses_arbitrary_kind() {
+        // motif-core itself doesn't validate `kind`; that's the bridge's
+        // job. Confirm any non-empty string parses.
+        let src = r#"
+            [identity]
+            user_id = "u"
+            device_id = "d"
+            [controller]
+            kind = "future-bridge-not-yet-implemented"
+            [storage]
+            path = "./x.db"
+        "#;
+        let cfg = MotifConfig::from_toml_str(src).unwrap();
+        assert_eq!(cfg.controller.kind, "future-bridge-not-yet-implemented");
     }
 
     #[test]

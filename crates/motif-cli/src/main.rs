@@ -10,8 +10,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use motif_core::{
-    ControllerConfig, ControllerKind, Engine, IdentityConfig, MotifConfig, Node, Params,
-    StorageConfig, Value,
+    ControllerConfig, Engine, IdentityConfig, MotifConfig, Node, Params, StorageConfig, Value,
 };
 
 const USAGE: &str = "\
@@ -94,7 +93,7 @@ fn bench_config() -> MotifConfig {
             device_id: "bench".into(),
         },
         controller: ControllerConfig {
-            kind: ControllerKind::InMemory,
+            kind: "in-memory".into(),
         },
         storage: StorageConfig {
             path: PathBuf::from(":memory:"),

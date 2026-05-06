@@ -31,9 +31,17 @@ pass can grep its way to the source.
 > the old `Record` enum and `MutationKind` enum into the unified
 > `Mutation` / `MutationOp` shape. PR #1 finding 3 (`read_label`
 > empty-string fallback for delete tees) is also retired — deletes now
-> carry the original op directly. The unary-minus and `Storage::truncate`
-> findings (4, 5, 6) and the `MutationLog::record` poison-mutex finding
-> (7) are still on the backlog below.
+> carry the original op directly.
+>
+> **v0.0.2-alpha.2 retired:** the `ControllerKind::InMemory`-only `[gap]`
+> entry (the enum is gone; `kind` is now an opaque string). The
+> in-memory MutationLog `[gap]` is also retired — the worker
+> consumes the log on its own thread (native) or microtask (wasm).
+>
+> Still on the backlog below: PR #1 findings 4 (id-predicate inside AND
+> chain), 5 (unary minus), 6 (`Storage::truncate` header guard), 7
+> (`MutationLog::record` poison-mutex). New v0.0.2 debt: WASM size
+> jump from the wasm-worker deps; no reconnect / offline-replay yet.
 
 ---
 
@@ -78,10 +86,12 @@ pass can grep its way to the source.
   execution) are both supported via configuration. Motif itself picks
   no strategy.
   *Source:* `motif.toml.example`; `MOTIF.md` decisions 21.
-- `[gap]` **Only `ControllerKind::InMemory` parses.** TOML rejects
-  `kind = "surreal"` or anything else. v0.0.2 drops the enum entirely
-  in favour of the abstract `Controller` trait + bridge crates.
-  *Source:* `crates/motif-core/src/config.rs:53-56`.
+- `[scope]` **`controller.kind` is an opaque string.** v0.0.2-alpha.2
+  dropped the `ControllerKind` enum so motif-core never enumerates
+  concrete bridges (per the OSS posture, MOTIF.md decision 18). The
+  bridge crate (or the host) interprets the string; conventional
+  values are documented in `motif.toml.example`.
+  *Source:* `crates/motif-core/src/config.rs` (`ControllerConfig`).
 
 ## Storage (`motif-core::storage`, `motif-core::record`)
 
@@ -221,20 +231,28 @@ pass can grep its way to the source.
   record once the controller flow lands in alpha.2.
   *Source:* `crates/motif-core/src/sync/mutation.rs`;
   `crates/motif-core/src/engine.rs`; `MOTIF.md` decision 5.
-- `[gap]` **No transport.** Only `InMemoryControllerClient` exists.
-  v0.0.2-alpha.2 lands the abstract `Controller` trait +
-  thread-per-controller worker; concrete bridges (e.g.
-  `motif-surreal-bridge`) ship outside motif-core.
-  *Source:* `crates/motif-core/src/sync/controller_client.rs:1-7`;
-  `MOTIF.md` decision 18.
-- `[gap]` **In-memory `MutationLog` is not yet drained.** v0.0.2-alpha.1
-  persists mutations to disk (the on-disk log IS the source of truth)
-  and tees foreshadowed mutations into the in-memory `MutationLog`,
-  but no controller drains it yet. v0.0.2-alpha.2 wires the
-  `Controller` trait + thread-per-controller worker that consumes the
-  log; alpha.4 adds reconnect / replay-after-disconnect.
-  *Source:* `crates/motif-core/src/sync/mutation_log.rs`;
-  `crates/motif-core/src/engine.rs` (`commit`, `with_mutation_log`).
+- `[gap]` **No concrete bridge crates.** v0.0.2-alpha.2 lands the
+  abstract `Controller` trait + thread-per-controller worker (native
+  `std::thread` + `mpsc`, wasm `wasm-bindgen-futures::spawn_local` +
+  `futures-channel::mpsc::unbounded`); only `InMemoryController` ships
+  in motif-core. Concrete transports (e.g. `motif-surreal-bridge`)
+  live outside motif-core per MOTIF.md decision 18.
+  *Source:* `crates/motif-core/src/sync/controller.rs`;
+  `crates/motif-core/src/sync/worker.rs`.
+- `[debt]` **WASM size jumped 308 KB in alpha.2.** wasm-bindgen-futures
+  + futures-channel + futures-util + js-sys add ~310 KB after
+  `wasm-opt -Oz` (713 KB total vs alpha.1's 405 KB; 35% of the 2 MiB
+  budget). v0.0.3+ should investigate a hand-rolled microtask
+  trampoline to drop futures-util specifically.
+  *Source:* `crates/motif-core/src/sync/worker.rs` (wasm impl);
+  workspace deps.
+- `[gap]` **No reconnect / offline-replay yet.** v0.0.2-alpha.2 wires
+  the worker but doesn't survive a worker crash or a controller
+  disconnect; mutations queued via the channel are dropped if the
+  receiver is gone. Reconnect + persisted-log replay land in
+  v0.0.2-alpha.4.
+  *Source:* `crates/motif-core/src/sync/worker.rs`; `MOTIF.md`
+  alpha.4 milestone.
 - `[debt]` **Tee fires after the storage append but before the index
   publishes for inserts.** A panic between those two steps would leave
   a record on disk that subsequent recovery picks up, with the

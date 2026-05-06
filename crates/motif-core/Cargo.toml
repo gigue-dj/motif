@@ -14,6 +14,15 @@ toml = { workspace = true }
 thiserror = { workspace = true }
 bincode = { workspace = true }
 
+# Worker-thread-per-controller scaffolding (v0.0.2-alpha.2). Native uses
+# std::thread + std::sync::mpsc directly (no extra deps); wasm uses
+# wasm-bindgen-futures::spawn_local + futures-channel for the async edge.
+# The wasm deps are target-gated so native builds stay slim.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = { workspace = true }
+futures-channel = { workspace = true }
+futures-util = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 

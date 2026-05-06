@@ -1,15 +1,19 @@
 //! Architectural test: every committed engine mutation is teed to the
-//! wired `MutationLog` and forwarded to the wired `ControllerClient`.
-//! v0.0.2-alpha.1 also asserts that fresh mutations carry foreshadow=true.
+//! controller worker. v0.0.2-alpha.2 asserts that the worker thread
+//! actually runs (mutations are visible from the test thread via
+//! `InMemoryHandle::wait_for`), and that the foreshadow flag is set on
+//! every fresh commit.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::time::Duration;
 
 use motif_core::{
-    ControllerConfig, ControllerKind, Engine, IdentityConfig, InMemoryControllerClient,
-    MotifConfig, MutationLog, MutationOp, Node, Params, StorageConfig, Value,
+    ControllerConfig, Engine, IdentityConfig, InMemoryController, MotifConfig, MutationOp, Node,
+    Params, StorageConfig, Value,
 };
 use tempfile::TempDir;
+
+const WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn config() -> MotifConfig {
     MotifConfig {
@@ -18,7 +22,7 @@ fn config() -> MotifConfig {
             device_id: "d_test".into(),
         },
         controller: ControllerConfig {
-            kind: ControllerKind::InMemory,
+            kind: "in-memory".into(),
         },
         storage: StorageConfig {
             path: PathBuf::from(":memory:"),
@@ -26,28 +30,22 @@ fn config() -> MotifConfig {
     }
 }
 
-fn engine_with_log() -> (
-    TempDir,
-    Engine,
-    Arc<MutationLog>,
-    Arc<InMemoryControllerClient>,
-) {
+fn engine_with_controller() -> (TempDir, Engine, motif_core::InMemoryHandle) {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("hook.db");
     let cfg = MotifConfig {
         storage: StorageConfig { path },
         ..config()
     };
-    let log = Arc::new(MutationLog::new());
-    let client = Arc::new(InMemoryControllerClient::new());
-    log.set_client(client.clone());
-    let engine = Engine::open(&cfg).unwrap().with_mutation_log(log.clone());
-    (dir, engine, log, client)
+    let controller = InMemoryController::new();
+    let handle = controller.handle();
+    let engine = Engine::open(&cfg).unwrap().with_controller(controller);
+    (dir, engine, handle)
 }
 
 #[test]
-fn every_insert_tees_a_mutation_to_the_log() {
-    let (_dir, mut e, _log, client) = engine_with_log();
+fn every_insert_tees_a_mutation_to_the_worker() {
+    let (_dir, mut e, handle) = engine_with_controller();
 
     e.query(
         "CREATE (n:Person {id: 'alice', name: 'Alice'})",
@@ -57,7 +55,7 @@ fn every_insert_tees_a_mutation_to_the_log() {
     e.query("CREATE (n:Person {id: 'bob'})", &Params::new())
         .unwrap();
 
-    let received = client.drain();
+    let received = handle.wait_for(2, WAIT_TIMEOUT);
     assert_eq!(received.len(), 2);
     assert!(received[0].foreshadow);
     assert!(received[1].foreshadow);
@@ -76,13 +74,14 @@ fn every_insert_tees_a_mutation_to_the_log() {
 
 #[test]
 fn delete_tees_a_mutation() {
-    let (_dir, mut e, _log, client) = engine_with_log();
+    let (_dir, mut e, handle) = engine_with_controller();
 
     e.insert_node(Node::new("doomed", "Person")).unwrap();
-    let _ = client.drain();
+    let _ = handle.wait_for(1, WAIT_TIMEOUT);
+    let _ = handle.drain();
 
     e.delete_node("doomed").unwrap();
-    let received = client.drain();
+    let received = handle.wait_for(1, WAIT_TIMEOUT);
     assert_eq!(received.len(), 1);
     assert!(received[0].foreshadow);
     match &received[0].op {
@@ -93,23 +92,26 @@ fn delete_tees_a_mutation() {
 
 #[test]
 fn no_mutation_emitted_for_failed_operations() {
-    let (_dir, mut e, _log, client) = engine_with_log();
+    let (_dir, mut e, handle) = engine_with_controller();
     e.query("CREATE (n:Person {id: 'a'})", &Params::new())
         .unwrap();
-    let _ = client.drain();
+    let _ = handle.wait_for(1, WAIT_TIMEOUT);
+    let _ = handle.drain();
 
     // Duplicate id should error and emit no mutation.
     let err = e.query("CREATE (n:Person {id: 'a'})", &Params::new());
     assert!(err.is_err());
-    assert!(client.is_empty());
+    // Give the worker a moment to (not) drain anything new.
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(handle.is_empty());
 }
 
 #[test]
-fn engine_without_log_still_works() {
+fn engine_without_controller_still_works() {
     let dir = TempDir::new().unwrap();
     let cfg = MotifConfig {
         storage: StorageConfig {
-            path: dir.path().join("nolog.db"),
+            path: dir.path().join("nocontroller.db"),
         },
         ..config()
     };
@@ -117,4 +119,26 @@ fn engine_without_log_still_works() {
     e.insert_node(Node::new("n", "Person").with_property("v", Value::I64(1)))
         .unwrap();
     assert!(e.get_node("n").unwrap().is_some());
+    // No controller wired → no MutationLog → buffered count is 0.
+    assert_eq!(e.buffered_mutation_count(), 0);
+}
+
+#[test]
+fn worker_preserves_local_seq_order_under_burst() {
+    // Submit a burst of writes; the worker should observe them in the
+    // same local_seq order the engine assigned. Sanity-checks the
+    // single-channel-per-controller invariant.
+    let (_dir, mut e, handle) = engine_with_controller();
+
+    const N: usize = 50;
+    for i in 0..N {
+        let id = format!("n{i}");
+        e.insert_node(Node::new(&id, "Person")).unwrap();
+    }
+
+    let received = handle.wait_for(N, WAIT_TIMEOUT);
+    assert_eq!(received.len(), N);
+    for (i, m) in received.iter().enumerate() {
+        assert_eq!(m.local_seq, (i + 1) as u64);
+    }
 }

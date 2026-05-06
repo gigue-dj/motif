@@ -6,8 +6,7 @@
 use std::path::PathBuf;
 
 use motif_core::{
-    ControllerConfig, ControllerKind, Edge, Engine, IdentityConfig, MotifConfig, Node,
-    StorageConfig, Value,
+    ControllerConfig, Edge, Engine, IdentityConfig, MotifConfig, Node, StorageConfig, Value,
 };
 use tempfile::TempDir;
 
@@ -18,7 +17,7 @@ fn config_with(path: PathBuf) -> MotifConfig {
             device_id: "d_xyz".into(),
         },
         controller: ControllerConfig {
-            kind: ControllerKind::InMemory,
+            kind: "in-memory".into(),
         },
         storage: StorageConfig { path },
     }
