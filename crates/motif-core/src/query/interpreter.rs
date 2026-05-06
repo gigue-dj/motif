@@ -1,10 +1,17 @@
 //! Direct interpreter: walks an AST and calls into [`Engine`]. No
-//! planner, no optimizer — v0.0.1 is small enough that the AST is the
-//! plan.
+//! planner, no optimizer — the AST is the plan.
 //!
 //! Pattern matching for `MATCH` is constant-time when the `WHERE`
-//! contains an `id(n) = $x` (or `id(n) = literal`) predicate, and an
-//! O(N) scan otherwise. Label and property predicates filter the scan.
+//! contains a top-level `id(n) = $x` (or `id(n) = literal`) predicate,
+//! and an O(N) scan otherwise. Label and property predicates filter the
+//! scan.
+//!
+//! v0.0.2-alpha.1 added the `_motif` metadata-as-data namespace per
+//! MOTIF.md decision 19. Property paths of the form `n._motif.<key>`
+//! resolve against the engine's runtime state rather than the on-disk
+//! node properties: `n._motif.foreshadow` returns the foreshadow flag,
+//! and any other `_motif.X` key returns `Value::Null` (extension space
+//! reserved for future metadata).
 
 use std::collections::BTreeMap;
 
@@ -34,6 +41,8 @@ pub enum InterpretError {
     MissingLabel,
     #[error("DELETE variable {0} does not match MATCH variable")]
     DeleteVariableMismatch(String),
+    #[error("nested property paths are not supported (got {0})")]
+    NestedPath(String),
 }
 
 pub fn execute(
@@ -79,7 +88,6 @@ fn exec_create(
             node.properties.insert(k, v);
         }
     }
-    // Engine errors (duplicate id, etc.) bubble up via Engine::query.
     engine
         .insert_node(node)
         .map_err(|e| InterpretError::TypeMismatch(e.to_string()))?;
@@ -125,7 +133,14 @@ fn exec_match_return(
         .iter()
         .map(|r| match r {
             ReturnItem::Variable(v) => v.clone(),
-            ReturnItem::Property { variable, key } => format!("{variable}.{key}"),
+            ReturnItem::Property { variable, path } => {
+                let mut s = variable.clone();
+                for seg in path {
+                    s.push('.');
+                    s.push_str(seg);
+                }
+                s
+            }
         })
         .collect();
 
@@ -133,7 +148,7 @@ fn exec_match_return(
     for node in matches {
         let mut row = Vec::with_capacity(return_items.len());
         for r in return_items {
-            row.push(project(r, &pattern.variable, &node)?);
+            row.push(project(r, &pattern.variable, &node, engine)?);
         }
         rows.push(row);
     }
@@ -176,7 +191,7 @@ fn find_matches(
         let mut out = Vec::new();
         if let Some(node) = by_id {
             if pattern_matches_node(pattern, &node)
-                && eval_predicate(where_clause, &pattern.variable, &node, params)?
+                && eval_predicate(where_clause, &pattern.variable, &node, params, engine)?
             {
                 out.push(node);
             }
@@ -193,7 +208,7 @@ fn find_matches(
         if !pattern_matches_node(pattern, &node) {
             continue;
         }
-        if !eval_predicate(where_clause, &pattern.variable, &node, params)? {
+        if !eval_predicate(where_clause, &pattern.variable, &node, params, engine)? {
             continue;
         }
         out.push(node);
@@ -227,7 +242,6 @@ fn extract_id_predicate(
             _ => None,
         };
         if let Some(other) = pair {
-            // Resolve `other` to a string id without needing a node binding.
             let v = eval_const(other, params)?;
             if let Value::String(s) = v {
                 return Ok(Some(s));
@@ -257,9 +271,10 @@ fn eval_predicate(
     variable: &str,
     node: &Node,
     params: &Params,
+    engine: &Engine,
 ) -> Result<bool, InterpretError> {
     let Some(expr) = expr else { return Ok(true) };
-    let v = eval_expr(expr, variable, node, params)?;
+    let v = eval_expr(expr, variable, node, params, engine)?;
     match v {
         Value::Bool(b) => Ok(b),
         Value::Null => Ok(false),
@@ -272,6 +287,7 @@ fn eval_expr(
     variable: &str,
     node: &Node,
     params: &Params,
+    engine: &Engine,
 ) -> Result<Value, InterpretError> {
     match expr {
         Expr::Literal(v) => Ok(v.clone()),
@@ -281,12 +297,12 @@ fn eval_expr(
             .ok_or_else(|| InterpretError::UnknownParam(name.clone())),
         Expr::IdOf(v) if v == variable => Ok(Value::String(node.id.clone())),
         Expr::IdOf(other) => Err(InterpretError::UnknownVariable(other.clone())),
-        Expr::Property { variable: v, key } if v == variable => {
-            Ok(node.properties.get(key).cloned().unwrap_or(Value::Null))
+        Expr::Property { variable: v, path } if v == variable => {
+            resolve_property_path(node, path, engine)
         }
         Expr::Property { variable: v, .. } => Err(InterpretError::UnknownVariable(v.clone())),
         Expr::Not(inner) => {
-            let v = eval_expr(inner, variable, node, params)?;
+            let v = eval_expr(inner, variable, node, params, engine)?;
             match v {
                 Value::Bool(b) => Ok(Value::Bool(!b)),
                 Value::Null => Ok(Value::Null),
@@ -294,10 +310,37 @@ fn eval_expr(
             }
         }
         Expr::Binary { op, lhs, rhs } => {
-            let l = eval_expr(lhs, variable, node, params)?;
-            let r = eval_expr(rhs, variable, node, params)?;
+            let l = eval_expr(lhs, variable, node, params, engine)?;
+            let r = eval_expr(rhs, variable, node, params, engine)?;
             apply_binop(*op, l, r)
         }
+    }
+}
+
+/// Resolve a property path against a bound node. Single-segment paths
+/// hit the node's user properties; `_motif.X` paths hit the metadata
+/// namespace (engine state).
+fn resolve_property_path(
+    node: &Node,
+    path: &[String],
+    engine: &Engine,
+) -> Result<Value, InterpretError> {
+    match path {
+        [key] => Ok(node.properties.get(key).cloned().unwrap_or(Value::Null)),
+        [namespace, key] if namespace == "_motif" => Ok(motif_metadata(node, key, engine)),
+        _ => {
+            let joined = path.join(".");
+            Err(InterpretError::NestedPath(joined))
+        }
+    }
+}
+
+/// `_motif.X` lookups. Unknown keys return `Value::Null` rather than an
+/// error so hosts can probe the namespace forward-compatibly.
+fn motif_metadata(node: &Node, key: &str, engine: &Engine) -> Value {
+    match key {
+        "foreshadow" => Value::Bool(engine.is_foreshadow(&node.id)),
+        _ => Value::Null,
     }
 }
 
@@ -370,12 +413,17 @@ fn compare(op: BinOp, l: &Value, r: &Value) -> Result<Value, InterpretError> {
     Ok(Value::Bool(result))
 }
 
-fn project(item: &ReturnItem, var: &str, node: &Node) -> Result<ResultCell, InterpretError> {
+fn project(
+    item: &ReturnItem,
+    var: &str,
+    node: &Node,
+    engine: &Engine,
+) -> Result<ResultCell, InterpretError> {
     match item {
         ReturnItem::Variable(v) if v == var => Ok(ResultCell::Node(node.clone())),
         ReturnItem::Variable(v) => Err(InterpretError::UnknownVariable(v.clone())),
-        ReturnItem::Property { variable: v, key } if v == var => Ok(ResultCell::Value(
-            node.properties.get(key).cloned().unwrap_or(Value::Null),
+        ReturnItem::Property { variable: v, path } if v == var => Ok(ResultCell::Value(
+            resolve_property_path(node, path, engine)?,
         )),
         ReturnItem::Property { variable: v, .. } => Err(InterpretError::UnknownVariable(v.clone())),
     }

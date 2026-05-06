@@ -217,9 +217,11 @@ impl<'a> Parser<'a> {
         loop {
             let var = self.expect_ident("return variable")?;
             let item = if matches!(self.peek(), Some(Token::Dot)) {
-                self.advance();
-                let key = self.expect_ident("property key")?;
-                ReturnItem::Property { variable: var, key }
+                let path = self.parse_property_path()?;
+                ReturnItem::Property {
+                    variable: var,
+                    path,
+                }
             } else {
                 ReturnItem::Variable(var)
             };
@@ -230,6 +232,18 @@ impl<'a> Parser<'a> {
                 return Ok(items);
             }
         }
+    }
+
+    /// Consume `.ident (.ident)*` and return the path. The leading dot
+    /// must already have been peeked (but not consumed) by the caller.
+    fn parse_property_path(&mut self) -> Result<Vec<String>, ParseError> {
+        debug_assert!(matches!(self.peek(), Some(Token::Dot)));
+        let mut path = Vec::new();
+        while matches!(self.peek(), Some(Token::Dot)) {
+            self.advance();
+            path.push(self.expect_ident("property key")?);
+        }
+        Ok(path)
     }
 
     fn parse_unsigned_int(&mut self) -> Result<u64, ParseError> {
@@ -370,11 +384,10 @@ impl<'a> Parser<'a> {
                     return Ok(Expr::IdOf(arg));
                 }
                 if matches!(self.peek(), Some(Token::Dot)) {
-                    self.advance();
-                    let key = self.expect_ident("property key")?;
+                    let path = self.parse_property_path()?;
                     Ok(Expr::Property {
                         variable: name,
-                        key,
+                        path,
                     })
                 } else {
                     Err(ParseError::Unexpected {
@@ -472,7 +485,7 @@ mod tests {
                 vec![
                     ReturnItem::Property {
                         variable: "n".into(),
-                        key: "name".into()
+                        path: vec!["name".into()],
                     },
                     ReturnItem::Variable("n".into()),
                 ]
@@ -488,5 +501,37 @@ mod tests {
         assert!(parse("CREATE 42").is_err());
         assert!(parse("MATCH (n) RETURN").is_err());
         assert!(parse("MATCH (n) RETURN n EXTRA").is_err());
+    }
+
+    #[test]
+    fn parses_motif_metadata_path() {
+        let s = parse("MATCH (n) WHERE n._motif.foreshadow = true RETURN n").unwrap();
+        let Statement::MatchReturn { where_clause, .. } = s else {
+            panic!("expected MatchReturn");
+        };
+        let where_clause = where_clause.expect("WHERE clause");
+        if let Expr::Binary { lhs, .. } = where_clause {
+            if let Expr::Property { variable, path } = *lhs {
+                assert_eq!(variable, "n");
+                assert_eq!(path, vec!["_motif".to_string(), "foreshadow".to_string()]);
+                return;
+            }
+        }
+        panic!("expected Property{{variable, path}} on the LHS of WHERE");
+    }
+
+    #[test]
+    fn parses_metadata_in_return() {
+        let s = parse("MATCH (n) RETURN n._motif.foreshadow").unwrap();
+        let Statement::MatchReturn { return_items, .. } = s else {
+            panic!()
+        };
+        assert_eq!(
+            return_items,
+            vec![ReturnItem::Property {
+                variable: "n".into(),
+                path: vec!["_motif".into(), "foreshadow".into()],
+            }]
+        );
     }
 }

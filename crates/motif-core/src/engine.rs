@@ -1,17 +1,25 @@
 //! Storage engine: orchestrates [`Storage`] backends with the on-disk
-//! record format and an in-memory `id → offset` index.
+//! Mutation log and an in-memory `id → offset` index.
 //!
-//! v0.0.1 alpha.3 surface:
+//! v0.0.2-alpha.1 surface:
 //!
-//! - `Engine::open(&MotifConfig)` — file-backed, replays the log on open
-//! - `Engine::open_with(&MotifConfig, Box<dyn Storage>)` — pluggable
-//! - `Engine::insert_node` / `insert_edge` — durable append
-//! - `Engine::get_node` / `get_edge` — by user-provided string id
+//! - `Engine::open(&MotifConfig)` — file-backed, replays the log on open.
+//! - `Engine::open_with(&MotifConfig, Box<dyn Storage>)` — pluggable.
+//! - `Engine::insert_node` / `insert_edge` — durable append; produces a
+//!   foreshadow=true [`Mutation`].
+//! - `Engine::delete_node` / `delete_edge` — durable append; produces a
+//!   foreshadow=true [`Mutation`].
+//! - `Engine::get_node` / `get_edge` — by user-provided string id.
+//! - `Engine::is_foreshadow(id)` — true while the latest mutation
+//!   targeting `id` has not yet been controller-confirmed.
+//! - `Engine::query(cypher, &Params)` — runs a Cypher-subset query;
+//!   `_motif.foreshadow` and other metadata-as-data namespaces are
+//!   resolved at projection time.
 //!
-//! Update, delete, transactions, and the `MutationLog` tee all land in
-//! later milestones. Single writer; the engine takes `&mut self` for
-//! both mutation and read operations because the underlying [`Storage`]
-//! seeks the file cursor on `read_at`.
+//! The on-disk log IS the persisted MutationLog: each on-disk record is
+//! a bincoded [`Mutation`]. Single writer; the engine takes `&mut self`
+//! for both mutation and read operations because the underlying
+//! [`Storage`] seeks the file cursor on `read_at`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,9 +27,9 @@ use std::sync::Arc;
 use crate::config::MotifConfig;
 use crate::graph::{Edge, Node};
 use crate::query::{self, Params, QueryError, QueryResult};
-use crate::record::{decode_framed, encode_framed, Record, RecordError, LEN_PREFIX_BYTES};
+use crate::record::{decode_framed, encode_framed, RecordError, LEN_PREFIX_BYTES};
 use crate::storage::{FileStorage, MemoryStorage, Storage, StorageError, HEADER_LEN};
-use crate::sync::{ActorId, Mutation, MutationKind, MutationLog};
+use crate::sync::{ActorId, Mutation, MutationLog, MutationOp};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -51,24 +59,36 @@ enum Kind {
 
 #[derive(Debug, Clone, Copy)]
 struct IndexEntry {
+    /// Byte offset of the framed Mutation in the underlying storage.
     offset: u64,
+    /// Length of the bincoded Mutation payload (excluding the 4-byte
+    /// length prefix).
     payload_len: u32,
+    /// Whether this id targets a node or an edge. Disambiguates the
+    /// id-shared map.
     kind: Kind,
+    /// Whether the latest mutation that produced this index entry is
+    /// still foreshadow=true. Updated on every commit; flipped by the
+    /// (alpha.2) controller-confirm flow.
+    foreshadow: bool,
 }
 
 pub struct Engine {
     storage: Box<dyn Storage>,
-    /// Maps user-provided id → on-disk record location.
-    /// v0.0.1 keeps both nodes and edges in a single map; ids must be
-    /// globally unique. v0.0.2 may split this if the namespaces collide.
+    /// Maps user-provided id → on-disk record location + foreshadow.
+    /// Globally unique id space across nodes and edges.
     index: HashMap<String, IndexEntry>,
     /// Per-instance actor identity copied from `MotifConfig::identity`.
-    /// Stamped onto every `Mutation` teed at commit time.
+    /// Stamped onto every [`Mutation`] produced by this engine.
     actor: ActorId,
-    /// Optional sink for committed mutations. When wired (via
-    /// `Engine::with_mutation_log`), every successful insert / delete
-    /// produces a `Mutation` after the storage append, so the controller
-    /// sees exactly what landed on disk.
+    /// Monotonic local sequence number. Starts at 1; bumped before each
+    /// commit. Recovery rewinds it to one past the highest seen
+    /// `local_seq` so subsequent commits stay strictly increasing.
+    next_local_seq: u64,
+    /// Optional in-memory queue of foreshadowed mutations awaiting
+    /// controller confirmation. v0.0.2-alpha.1 just records into it; the
+    /// drain side lands in alpha.2 when the Controller trait + worker
+    /// thread arrive.
     mutation_log: Option<Arc<MutationLog>>,
 }
 
@@ -76,17 +96,17 @@ impl Engine {
     /// Open the engine using the path from `config.storage`.
     ///
     /// On `wasm32-unknown-unknown` this will fail at the first file system
-    /// call — use [`Engine::open_with`] with a [`MemoryStorage`] there
-    /// until alpha.5 wires a host-provided backend.
+    /// call — use [`Engine::open_in_memory`] there until alpha.4 wires a
+    /// host-provided storage backend.
     pub fn open(config: &MotifConfig) -> Result<Self, EngineError> {
         let storage = FileStorage::open(&config.storage.path)?;
         Self::open_with(config, Box::new(storage))
     }
 
     /// Open the engine in memory. The `path` field of `config.storage` is
-    /// ignored. Intended for tests and for the alpha.5 wasm path.
-    pub fn open_in_memory(_config: &MotifConfig) -> Result<Self, EngineError> {
-        Self::open_with(_config, Box::new(MemoryStorage::new()))
+    /// ignored. Intended for tests and for the wasm path.
+    pub fn open_in_memory(config: &MotifConfig) -> Result<Self, EngineError> {
+        Self::open_with(config, Box::new(MemoryStorage::new()))
     }
 
     /// Open with a caller-provided backend.
@@ -98,17 +118,15 @@ impl Engine {
                 user_id: config.identity.user_id.clone(),
                 device_id: config.identity.device_id.clone(),
             },
+            next_local_seq: 1,
             mutation_log: None,
         };
         engine.recover()?;
         Ok(engine)
     }
 
-    /// Wire a `MutationLog` to receive a `Mutation` for every committed
-    /// insert / delete. The hook fires *after* the storage append succeeds
-    /// (so a queued mutation always corresponds to a record on disk) and
-    /// before the in-memory index is updated for inserts (so the index is
-    /// only "live" once the controller has been informed).
+    /// Wire an in-memory [`MutationLog`]. v0.0.2-alpha.1 records into it
+    /// on every commit; alpha.2 will let the Controller worker drain it.
     pub fn with_mutation_log(mut self, log: Arc<MutationLog>) -> Self {
         self.mutation_log = Some(log);
         self
@@ -119,10 +137,11 @@ impl Engine {
         &self.actor
     }
 
-    /// Replay the log from the start, rebuilding the in-memory index.
-    /// On a torn-write decode error at the tail, we truncate the file
-    /// back to the last good record and continue. On a decode error in
-    /// the middle of the log, we surface `EngineError::Recovery`.
+    /// Replay the log from the start, rebuilding the in-memory index
+    /// and the foreshadow map. On a torn-write decode error at the tail,
+    /// truncate the file back to the last good record and continue. On
+    /// a decode error in the middle of the log, surface
+    /// `EngineError::Recovery`.
     fn recover(&mut self) -> Result<(), EngineError> {
         let total = self.storage.len();
         let mut cursor: u64 = HEADER_LEN;
@@ -130,7 +149,6 @@ impl Engine {
 
         while cursor < total {
             let remaining = (total - cursor) as usize;
-            // Read the length prefix; if we can't, treat it as a torn tail.
             if remaining < LEN_PREFIX_BYTES {
                 break;
             }
@@ -139,42 +157,23 @@ impl Engine {
                 u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]);
             let total_record = LEN_PREFIX_BYTES + payload_len as usize;
             if remaining < total_record {
-                // Torn tail: truncate and stop.
                 self.storage.truncate(last_good)?;
                 return Ok(());
             }
 
             let frame = self.storage.read_at(cursor, total_record)?;
             match decode_framed(&frame) {
-                Ok(Some((record, consumed))) => {
+                Ok(Some((mutation, consumed))) => {
                     debug_assert_eq!(consumed, total_record);
-                    match &record {
-                        Record::NodeInsert(_) | Record::EdgeInsert(_) => {
-                            let kind = match &record {
-                                Record::NodeInsert(_) => Kind::Node,
-                                Record::EdgeInsert(_) => Kind::Edge,
-                                _ => unreachable!(),
-                            };
-                            self.index.insert(
-                                record.id().to_owned(),
-                                IndexEntry {
-                                    offset: cursor,
-                                    payload_len,
-                                    kind,
-                                },
-                            );
-                        }
-                        Record::NodeDelete(id) | Record::EdgeDelete(id) => {
-                            self.index.remove(id);
-                        }
+                    self.apply_recovered(&mutation, cursor, payload_len);
+                    if mutation.local_seq >= self.next_local_seq {
+                        self.next_local_seq = mutation.local_seq + 1;
                     }
                     cursor += total_record as u64;
                     last_good = cursor;
                 }
                 Ok(None) => break,
                 Err(source) => {
-                    // Bad payload mid-log: this is genuinely corrupt, not
-                    // a torn tail. Surface it.
                     return Err(EngineError::Recovery {
                         offset: cursor,
                         source,
@@ -189,12 +188,38 @@ impl Engine {
         Ok(())
     }
 
+    /// Apply a Mutation we just decoded during recovery to the in-memory
+    /// index. Each replayed mutation either installs / updates an index
+    /// entry or removes one.
+    fn apply_recovered(&mut self, m: &Mutation, offset: u64, payload_len: u32) {
+        match &m.op {
+            MutationOp::NodeInsert(_) | MutationOp::EdgeInsert(_) => {
+                let kind = if m.op.is_node() {
+                    Kind::Node
+                } else {
+                    Kind::Edge
+                };
+                self.index.insert(
+                    m.op.target_id().to_owned(),
+                    IndexEntry {
+                        offset,
+                        payload_len,
+                        kind,
+                        foreshadow: m.foreshadow,
+                    },
+                );
+            }
+            MutationOp::NodeDelete(id) | MutationOp::EdgeDelete(id) => {
+                self.index.remove(id);
+            }
+        }
+    }
+
     pub fn insert_node(&mut self, node: Node) -> Result<(), EngineError> {
         if self.index.contains_key(&node.id) {
             return Err(EngineError::DuplicateId(node.id));
         }
-        let record = Record::NodeInsert(node);
-        self.append_record(record, Kind::Node)
+        self.commit(MutationOp::NodeInsert(node))
     }
 
     pub fn insert_edge(&mut self, edge: Edge) -> Result<(), EngineError> {
@@ -207,70 +232,18 @@ impl Engine {
         if !self.has_node(&edge.to) {
             return Err(EngineError::MissingNode(edge.to));
         }
-        let record = Record::EdgeInsert(edge);
-        self.append_record(record, Kind::Edge)
+        self.commit(MutationOp::EdgeInsert(edge))
     }
 
-    fn append_record(&mut self, record: Record, kind: Kind) -> Result<(), EngineError> {
-        let id = record.id().to_owned();
-        let frame = encode_framed(&record)?;
-        let payload_len = (frame.len() - LEN_PREFIX_BYTES) as u32;
-        let offset = self.storage.append(&frame)?;
-        // Tee to the controller before we publish to the index, so a
-        // reader cannot observe the change until the controller has been
-        // informed. The tee is best-effort: if no log is wired, this is
-        // a no-op.
-        let kind_for_mutation = match (&record, kind) {
-            (Record::NodeInsert(_), _) => MutationKind::NodeInsert,
-            (Record::EdgeInsert(_), _) => MutationKind::RelInsert,
-            _ => unreachable!("append_record only called for inserts"),
-        };
-        let table_name = match &record {
-            Record::NodeInsert(n) => n.label.clone(),
-            Record::EdgeInsert(e) => e.label.clone(),
-            _ => unreachable!(),
-        };
-        self.tee_mutation(kind_for_mutation, table_name, &frame[LEN_PREFIX_BYTES..]);
-        self.index.insert(
-            id,
-            IndexEntry {
-                offset,
-                payload_len,
-                kind,
-            },
-        );
-        Ok(())
-    }
-
-    fn tee_mutation(&self, kind: MutationKind, table_name: String, payload: &[u8]) {
-        let Some(log) = &self.mutation_log else {
-            return;
-        };
-        log.record(Mutation {
-            local_seq: 0, // overwritten by MutationLog::record
-            kind,
-            actor: self.actor.clone(),
-            table_name,
-            wal_payload: payload.to_vec(),
-        });
-    }
-
-    /// Delete a node by id. v0.0.1 does not enforce referential integrity:
-    /// edges that reference a deleted node become dangling. The query
-    /// layer treats them as unreachable. A `DETACH DELETE`-style cascade
-    /// lands when the controller-side conflict resolution does in v0.0.2.
+    /// Delete a node by id. v0.0.2 still does not enforce referential
+    /// integrity: edges that reference a deleted node become dangling
+    /// (the query layer treats them as unreachable). `DETACH DELETE`-
+    /// style cascade is a v0.0.3+ design item.
     pub fn delete_node(&mut self, id: &str) -> Result<bool, EngineError> {
         if !self.has_node(id) {
             return Ok(false);
         }
-        // Capture the label *before* deletion so the controller mutation
-        // can carry it. v0.0.1 has no other way to recover the label from
-        // an id once the index entry is gone.
-        let label = self.read_label(id)?.unwrap_or_default();
-        let frame = encode_framed(&Record::NodeDelete(id.to_owned()))?;
-        self.storage.append(&frame)?;
-        self.tee_mutation(MutationKind::NodeDelete, label, id.as_bytes());
-        self.index.remove(id);
+        self.commit(MutationOp::NodeDelete(id.to_owned()))?;
         Ok(true)
     }
 
@@ -278,30 +251,65 @@ impl Engine {
         if !self.has_edge(id) {
             return Ok(false);
         }
-        let label = self.read_label(id)?.unwrap_or_default();
-        let frame = encode_framed(&Record::EdgeDelete(id.to_owned()))?;
-        self.storage.append(&frame)?;
-        self.tee_mutation(MutationKind::RelDelete, label, id.as_bytes());
-        self.index.remove(id);
+        self.commit(MutationOp::EdgeDelete(id.to_owned()))?;
         Ok(true)
     }
 
-    fn read_label(&mut self, id: &str) -> Result<Option<String>, EngineError> {
-        let Some(entry) = self.index.get(id).copied() else {
-            return Ok(None);
+    /// Build a foreshadow=true Mutation, frame it, append to storage,
+    /// publish to the in-memory index, and tee to the in-memory
+    /// MutationLog (if wired). Single source of truth for "what just
+    /// landed on disk."
+    fn commit(&mut self, op: MutationOp) -> Result<(), EngineError> {
+        let local_seq = self.next_local_seq;
+        self.next_local_seq += 1;
+
+        let m = Mutation {
+            local_seq,
+            actor: self.actor.clone(),
+            foreshadow: true,
+            op,
         };
-        let frame_len = LEN_PREFIX_BYTES + entry.payload_len as usize;
-        let bytes = self.storage.read_at(entry.offset, frame_len)?;
-        Ok(decode_framed(&bytes)?.and_then(|(r, _)| match r {
-            Record::NodeInsert(n) => Some(n.label),
-            Record::EdgeInsert(e) => Some(e.label),
-            _ => None,
-        }))
+
+        let frame = encode_framed(&m)?;
+        let payload_len = (frame.len() - LEN_PREFIX_BYTES) as u32;
+        let offset = self.storage.append(&frame)?;
+
+        // Update the in-memory index from the same Mutation we just
+        // persisted, so on-disk state and in-memory state agree.
+        match &m.op {
+            MutationOp::NodeInsert(_) | MutationOp::EdgeInsert(_) => {
+                let kind = if m.op.is_node() {
+                    Kind::Node
+                } else {
+                    Kind::Edge
+                };
+                self.index.insert(
+                    m.op.target_id().to_owned(),
+                    IndexEntry {
+                        offset,
+                        payload_len,
+                        kind,
+                        foreshadow: m.foreshadow,
+                    },
+                );
+            }
+            MutationOp::NodeDelete(id) | MutationOp::EdgeDelete(id) => {
+                self.index.remove(id);
+            }
+        }
+
+        // Tee to the in-memory MutationLog for the (alpha.2) controller
+        // worker. No-op when no log is wired.
+        if let Some(log) = &self.mutation_log {
+            log.record(m);
+        }
+        Ok(())
     }
 
-    /// Materialize all live nodes. v0.0.1 does an O(N) scan because the
-    /// only secondary index is the id map. Acceptable up to the alpha-era
-    /// graph sizes (~1k nodes); a label/property index is alpha.5+ work.
+    /// Materialize all live nodes. v0.0.1 / v0.0.2-alpha.1 do an O(N)
+    /// scan because the only secondary index is the id map. Acceptable
+    /// up to alpha-era graph sizes; a label / property index is later
+    /// work.
     pub fn iter_nodes(&mut self) -> Result<Vec<Node>, EngineError> {
         let entries: Vec<(String, IndexEntry)> = self
             .index
@@ -311,9 +319,7 @@ impl Engine {
             .collect();
         let mut out = Vec::with_capacity(entries.len());
         for (_, entry) in entries {
-            let frame_len = LEN_PREFIX_BYTES + entry.payload_len as usize;
-            let bytes = self.storage.read_at(entry.offset, frame_len)?;
-            if let Some((Record::NodeInsert(n), _)) = decode_framed(&bytes)? {
+            if let Some(MutationOp::NodeInsert(n)) = self.read_op_at(&entry)? {
                 out.push(n);
             }
         }
@@ -329,9 +335,7 @@ impl Engine {
             .collect();
         let mut out = Vec::with_capacity(entries.len());
         for (_, entry) in entries {
-            let frame_len = LEN_PREFIX_BYTES + entry.payload_len as usize;
-            let bytes = self.storage.read_at(entry.offset, frame_len)?;
-            if let Some((Record::EdgeInsert(e), _)) = decode_framed(&bytes)? {
+            if let Some(MutationOp::EdgeInsert(e)) = self.read_op_at(&entry)? {
                 out.push(e);
             }
         }
@@ -339,33 +343,41 @@ impl Engine {
     }
 
     pub fn get_node(&mut self, id: &str) -> Result<Option<Node>, EngineError> {
-        match self.read(id, Kind::Node)? {
-            Some(Record::NodeInsert(n)) => Ok(Some(n)),
-            _ => Ok(None),
+        let Some(entry) = self.index.get(id).copied() else {
+            return Ok(None);
+        };
+        if entry.kind != Kind::Node {
+            return Ok(None);
         }
+        Ok(self.read_op_at(&entry)?.and_then(|op| match op {
+            MutationOp::NodeInsert(n) => Some(n),
+            _ => None,
+        }))
     }
 
     pub fn get_edge(&mut self, id: &str) -> Result<Option<Edge>, EngineError> {
-        match self.read(id, Kind::Edge)? {
-            Some(Record::EdgeInsert(e)) => Ok(Some(e)),
-            _ => Ok(None),
+        let Some(entry) = self.index.get(id).copied() else {
+            return Ok(None);
+        };
+        if entry.kind != Kind::Edge {
+            return Ok(None);
         }
+        Ok(self.read_op_at(&entry)?.and_then(|op| match op {
+            MutationOp::EdgeInsert(e) => Some(e),
+            _ => None,
+        }))
     }
 
-    fn read(&mut self, id: &str, expected: Kind) -> Result<Option<Record>, EngineError> {
-        let entry = match self.index.get(id) {
-            Some(e) if e.kind == expected => *e,
-            _ => return Ok(None),
-        };
+    fn read_op_at(&mut self, entry: &IndexEntry) -> Result<Option<MutationOp>, EngineError> {
         let frame_len = LEN_PREFIX_BYTES + entry.payload_len as usize;
         let bytes = self.storage.read_at(entry.offset, frame_len)?;
-        let (record, _) = decode_framed(&bytes)?.ok_or(EngineError::Recovery {
+        let (mutation, _) = decode_framed(&bytes)?.ok_or(EngineError::Recovery {
             offset: entry.offset,
             source: RecordError::Decode(bincode::error::DecodeError::Other(
-                "indexed record decoded to None",
+                "indexed mutation decoded to None",
             )),
         })?;
-        Ok(Some(record))
+        Ok(Some(mutation.op))
     }
 
     pub fn has_node(&self, id: &str) -> bool {
@@ -376,20 +388,29 @@ impl Engine {
         matches!(self.index.get(id), Some(e) if e.kind == Kind::Edge)
     }
 
+    /// True iff the latest mutation targeting `id` is still
+    /// foreshadow=true. Returns `false` for unknown ids.
+    ///
+    /// Exposed via the `_motif.foreshadow` Cypher metadata namespace
+    /// per MOTIF.md decision 19 (metadata-as-data).
+    pub fn is_foreshadow(&self, id: &str) -> bool {
+        self.index.get(id).map(|e| e.foreshadow).unwrap_or(false)
+    }
+
     pub fn node_count(&self) -> usize {
         self.index.values().filter(|e| e.kind == Kind::Node).count()
     }
 
+    pub fn edge_count(&self) -> usize {
+        self.index.values().filter(|e| e.kind == Kind::Edge).count()
+    }
+
     /// Execute a Cypher-subset query. See `query` module docs for the
-    /// supported grammar in v0.0.1.
+    /// supported grammar.
     pub fn query(&mut self, cypher: &str, params: &Params) -> Result<QueryResult, EngineError> {
         let stmt = query::parse(cypher)?;
         let result = query::execute(self, &stmt, params).map_err(QueryError::from)?;
         Ok(result)
-    }
-
-    pub fn edge_count(&self) -> usize {
-        self.index.values().filter(|e| e.kind == Kind::Edge).count()
     }
 }
 
@@ -425,6 +446,14 @@ mod tests {
         assert_eq!(got.id, "n1");
         assert_eq!(got.label, "Person");
         assert_eq!(got.properties["name"], Value::String("Alice".into()));
+    }
+
+    #[test]
+    fn fresh_inserts_are_foreshadowed() {
+        let mut e = Engine::open_in_memory(&cfg()).unwrap();
+        e.insert_node(Node::new("n1", "Person")).unwrap();
+        assert!(e.is_foreshadow("n1"));
+        assert!(!e.is_foreshadow("nope"));
     }
 
     #[test]
@@ -467,6 +496,18 @@ mod tests {
         let mut e = Engine::open_in_memory(&cfg()).unwrap();
         e.insert_node(Node::new("a", "Person")).unwrap();
         assert!(e.get_node("missing").unwrap().is_none());
-        assert!(e.get_edge("a").unwrap().is_none()); // it's a node, not an edge
+        assert!(e.get_edge("a").unwrap().is_none());
+    }
+
+    #[test]
+    fn local_seq_is_monotonic_per_commit() {
+        let mut e = Engine::open_in_memory(&cfg()).unwrap();
+        assert_eq!(e.next_local_seq, 1);
+        e.insert_node(Node::new("a", "Person")).unwrap();
+        assert_eq!(e.next_local_seq, 2);
+        e.insert_node(Node::new("b", "Person")).unwrap();
+        assert_eq!(e.next_local_seq, 3);
+        e.delete_node("a").unwrap();
+        assert_eq!(e.next_local_seq, 4);
     }
 }

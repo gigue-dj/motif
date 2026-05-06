@@ -1,8 +1,9 @@
-//! Abstract syntax tree for the v0.0.1 Cypher subset.
+//! Abstract syntax tree for the Cypher subset.
 //!
-//! Intentionally minimal: a single bound variable per query, single-pattern
-//! `MATCH`, `CREATE` / `MERGE` for nodes only (edge create lands in
-//! alpha.5), and a flat expression tree for `WHERE`.
+//! Intentionally minimal: a single bound variable per query,
+//! single-pattern `MATCH`, `CREATE` / `MERGE` for nodes only, and a flat
+//! expression tree for `WHERE`. v0.0.2-alpha.1 added multi-dot property
+//! paths to support metadata-as-data namespaces (`n._motif.foreshadow`).
 
 use std::collections::BTreeMap;
 
@@ -44,18 +45,21 @@ pub struct NodePattern {
 pub enum ReturnItem {
     /// `RETURN n`
     Variable(String),
-    /// `RETURN n.name`
-    Property { variable: String, key: String },
+    /// `RETURN n.name` or `RETURN n._motif.foreshadow`. `path` is at
+    /// least one element; the first element is the top-level key. A
+    /// path of length > 1 with `_motif` as the first element addresses
+    /// the metadata-as-data namespace (see MOTIF.md decision 19).
+    Property { variable: String, path: Vec<String> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Literal(Value),
     Param(String),
-    /// `n.prop`
+    /// `n.prop` or `n._motif.foreshadow`. See `ReturnItem::Property`.
     Property {
         variable: String,
-        key: String,
+        path: Vec<String>,
     },
     /// `id(n)` — the only built-in function in v0.0.1.
     IdOf(String),

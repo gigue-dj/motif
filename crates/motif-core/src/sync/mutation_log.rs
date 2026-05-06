@@ -1,10 +1,12 @@
-//! `MutationLog` is the bridge between a local commit and the
-//! `ControllerClient`. It assigns monotonic `local_seq` values and either
-//! forwards to the wired client or buffers if none is wired yet.
+//! `MutationLog` is the in-memory bridge between an engine commit and a
+//! wired [`ControllerClient`]. It either forwards mutations to a wired
+//! client or buffers them until one is wired.
 //!
-//! v0.0.1 keeps the log entirely in-process. v0.0.2 will persist it
-//! alongside the storage engine so queued mutations survive crashes and
-//! offline-mode restarts.
+//! As of v0.0.2-alpha.1, `local_seq` is assigned by the engine before
+//! `record()` is called — the engine owns sequence numbering because
+//! the on-disk Mutation log (which IS the persisted source of truth)
+//! must agree with what the controller eventually sees. The MutationLog
+//! is now purely an in-memory FIFO for the controller worker.
 
 use std::sync::{Arc, Mutex};
 
@@ -17,46 +19,38 @@ pub struct MutationLog {
 
 #[derive(Default)]
 struct Inner {
-    next_seq: u64,
     buffer: Vec<Mutation>,
     client: Option<Arc<dyn ControllerClient>>,
 }
 
 impl MutationLog {
     pub fn new() -> Self {
-        Self {
-            inner: Mutex::new(Inner {
-                next_seq: 1,
-                buffer: Vec::new(),
-                client: None,
-            }),
-        }
+        Self::default()
     }
 
-    /// Record a mutation. The `local_seq` field of the input is overwritten
-    /// with the next monotonic value. If a client is wired, the mutation
-    /// is forwarded under the lock so the per-mutation order matches the
-    /// `local_seq` order observed by the client.
-    pub fn record(&self, mut m: Mutation) {
+    /// Record an already-sequenced mutation. The caller is expected to
+    /// have assigned `local_seq`; we don't touch it. If a client is
+    /// wired, the mutation is forwarded under the lock so per-mutation
+    /// order matches the `local_seq` order observed by the client.
+    pub fn record(&self, m: Mutation) {
         let mut g = self.inner.lock().expect("poisoned");
-        m.local_seq = g.next_seq;
-        g.next_seq += 1;
         match g.client.clone() {
             Some(client) => client.apply_mutation(m),
             None => g.buffer.push(m),
         }
     }
 
-    /// Wire a client. Pre-buffered mutations are NOT replayed automatically
-    /// — the caller chooses whether to drain them via `take_buffer` and
-    /// re-apply.
+    /// Wire a client. Pre-buffered mutations are NOT replayed
+    /// automatically — the caller chooses whether to drain them via
+    /// `take_buffer` and re-apply.
     pub fn set_client(&self, client: Arc<dyn ControllerClient>) {
         let mut g = self.inner.lock().expect("poisoned");
         g.client = Some(client);
     }
 
-    /// Take everything currently buffered. Used for tests and for the
-    /// alpha.5 WAL-replay startup path.
+    /// Take everything currently buffered. Used by tests and by the
+    /// alpha.2 reconnect path that replays buffered mutations after
+    /// the controller worker comes back online.
     pub fn take_buffer(&self) -> Vec<Mutation> {
         let mut g = self.inner.lock().expect("poisoned");
         std::mem::take(&mut g.buffer)
@@ -69,27 +63,27 @@ impl MutationLog {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{ActorId, InMemoryControllerClient, MutationKind};
+    use super::super::{ActorId, InMemoryControllerClient, MutationOp};
     use super::*;
+    use crate::graph::Node;
 
-    fn sample(kind: MutationKind) -> Mutation {
+    fn sample(seq: u64, op: MutationOp) -> Mutation {
         Mutation {
-            local_seq: 0, // overwritten by record()
-            kind,
+            local_seq: seq,
             actor: ActorId {
                 user_id: "u".into(),
                 device_id: "d".into(),
             },
-            table_name: "T".into(),
-            wal_payload: vec![],
+            foreshadow: true,
+            op,
         }
     }
 
     #[test]
-    fn assigns_monotonic_seq_when_buffering() {
+    fn buffers_when_no_client_wired() {
         let log = MutationLog::new();
-        log.record(sample(MutationKind::NodeInsert));
-        log.record(sample(MutationKind::NodeUpdate));
+        log.record(sample(1, MutationOp::NodeInsert(Node::new("a", "T"))));
+        log.record(sample(2, MutationOp::NodeInsert(Node::new("b", "T"))));
         let drained = log.take_buffer();
         assert_eq!(drained.len(), 2);
         assert_eq!(drained[0].local_seq, 1);
@@ -101,8 +95,11 @@ mod tests {
         let client = Arc::new(InMemoryControllerClient::new());
         let log = MutationLog::new();
         log.set_client(client.clone());
-        log.record(sample(MutationKind::NodeInsert));
-        log.record(sample(MutationKind::RelInsert));
+        log.record(sample(1, MutationOp::NodeInsert(Node::new("a", "T"))));
+        log.record(sample(
+            2,
+            MutationOp::EdgeInsert(crate::graph::Edge::new("e", "F", "a", "a")),
+        ));
         assert_eq!(log.buffered_len(), 0);
         let received = client.drain();
         assert_eq!(received.len(), 2);
@@ -111,12 +108,12 @@ mod tests {
     }
 
     #[test]
-    fn seq_continues_after_wiring() {
+    fn does_not_renumber_after_wiring() {
         let log = MutationLog::new();
-        log.record(sample(MutationKind::NodeInsert)); // seq 1, buffered
+        log.record(sample(1, MutationOp::NodeInsert(Node::new("a", "T"))));
         let client = Arc::new(InMemoryControllerClient::new());
         log.set_client(client.clone());
-        log.record(sample(MutationKind::NodeUpdate)); // seq 2, forwarded
+        log.record(sample(2, MutationOp::NodeInsert(Node::new("b", "T"))));
         assert_eq!(log.buffered_len(), 1);
         assert_eq!(client.len(), 1);
         assert_eq!(client.drain()[0].local_seq, 2);

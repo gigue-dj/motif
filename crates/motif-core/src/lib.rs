@@ -23,6 +23,6 @@ pub use graph::{Edge, Node, Properties};
 pub use query::{Params, QueryError, QueryResult, ResultCell, Statement};
 pub use storage::{FileStorage, MemoryStorage, Storage, StorageError};
 pub use sync::{
-    ActorId, ControllerClient, InMemoryControllerClient, Mutation, MutationKind, MutationLog,
+    ActorId, ControllerClient, InMemoryControllerClient, Mutation, MutationLog, MutationOp,
 };
 pub use value::Value;

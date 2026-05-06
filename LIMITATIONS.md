@@ -25,6 +25,16 @@ silences in code are tracked vs. forgotten.
 Each item carries the file/region where the caveat lives, so the audit
 pass can grep its way to the source.
 
+> **v0.0.2-alpha.1 retired:** PR #1 review findings 1 (`MutationKind::Rel*`
+> vs `Record::Edge*` naming) and 2 (`wal_payload` asymmetric across
+> inserts and deletes) — both subsumed by the redesign that collapsed
+> the old `Record` enum and `MutationKind` enum into the unified
+> `Mutation` / `MutationOp` shape. PR #1 finding 3 (`read_label`
+> empty-string fallback for delete tees) is also retired — deletes now
+> carry the original op directly. The unary-minus and `Storage::truncate`
+> findings (4, 5, 6) and the `MutationLog::record` poison-mutex finding
+> (7) are still on the backlog below.
+
 ---
 
 ## Build / distribution
@@ -205,56 +215,34 @@ pass can grep its way to the source.
   must show no network deps. Likewise host-side event/MCP layers live
   in `hubs/` (`motif-hub` etc.).
   *Source:* `MOTIF.md` decisions 3, 18.
-- `[scope]` **Foreshadow semantics.** v0.0.2 adds a `foreshadow: bool`
-  flag on `Mutation` to mark "applied locally, not yet confirmed."
-  Server-wins resolution flips the flag or evicts the record.
-  Foreshadow is transparent to query semantics unless the caller
-  explicitly queries metadata.
-  *Source:* `MOTIF.md` decision 5.
+- `[scope]` **Foreshadow semantics.** v0.0.2-alpha.1 added a
+  `foreshadow: bool` flag to `Mutation` (default `true` on every fresh
+  commit). Server-wins resolution will flip the flag or evict the
+  record once the controller flow lands in alpha.2.
+  *Source:* `crates/motif-core/src/sync/mutation.rs`;
+  `crates/motif-core/src/engine.rs`; `MOTIF.md` decision 5.
 - `[gap]` **No transport.** Only `InMemoryControllerClient` exists.
-  v0.0.2 lands the abstract `Controller` trait + thread-per-controller
-  worker; concrete bridges (e.g. `motif-surreal-bridge`) ship outside
-  motif-core.
+  v0.0.2-alpha.2 lands the abstract `Controller` trait +
+  thread-per-controller worker; concrete bridges (e.g.
+  `motif-surreal-bridge`) ship outside motif-core.
   *Source:* `crates/motif-core/src/sync/controller_client.rs:1-7`;
   `MOTIF.md` decision 18.
-- `[gap]` **`MutationLog` is in-process only.** Crash-safe persisted
-  log alongside storage is v0.0.2. Until then, queued mutations are
-  lost on restart.
-  *Source:* `crates/motif-core/src/sync/mutation_log.rs:5-9`.
+- `[gap]` **In-memory `MutationLog` is not yet drained.** v0.0.2-alpha.1
+  persists mutations to disk (the on-disk log IS the source of truth)
+  and tees foreshadowed mutations into the in-memory `MutationLog`,
+  but no controller drains it yet. v0.0.2-alpha.2 wires the
+  `Controller` trait + thread-per-controller worker that consumes the
+  log; alpha.4 adds reconnect / replay-after-disconnect.
+  *Source:* `crates/motif-core/src/sync/mutation_log.rs`;
+  `crates/motif-core/src/engine.rs` (`commit`, `with_mutation_log`).
 - `[debt]` **Tee fires after the storage append but before the index
   publishes for inserts.** A panic between those two steps would leave
   a record on disk that subsequent recovery picks up, with the
   controller already informed — fine. The opposite order would let a
   reader observe a write the controller doesn't know about, so the
   current order is intentional. Document and lock in with a panic-
-  safety test in the audit pass.
-  *Source:* `crates/motif-core/src/engine.rs` (`append_record`,
-  `tee_mutation`).
-- `[debt]` **`read_label` for delete tees does an extra read.**
-  We re-read the deleted record's frame just to recover the label so
-  the `Mutation::table_name` field is meaningful. Cheap (one offset
-  read) but redundant; a label cache on `IndexEntry` is a v0.0.2 win.
-  *Source:* `crates/motif-core/src/engine.rs` (`read_label`).
-- `[scope]` **`wal_payload` is opaque bytes.** v0.0.1 forwards
-  serialized engine records verbatim. Structured diffs for the
-  controller arrive when the SurrealQL boundary lands.
-  *Source:* `crates/motif-core/src/sync/mutation.rs:1-3`.
-- `[debt]` **`wal_payload` shape is asymmetric across inserts and
-  deletes.** Inserts ship `&frame[LEN_PREFIX_BYTES..]` (bincode-encoded
-  `Record::*Insert`); deletes ship `id.as_bytes()` (raw UTF-8, not
-  valid bincode for a `String`). When the controller transport lands
-  in v0.0.2 the consumer would have to branch on `kind` to decode. A
-  uniform "always bincode of `Record::*`" shape is one small change.
-  *Source:* `crates/motif-core/src/engine.rs` `delete_node:272`,
-  `delete_edge:284`. Logged from PR #1 review (finding 2).
-- `[debt]` **Naming inconsistency: `MutationKind::RelInsert` /
-  `RelDelete` vs `Record::EdgeInsert` / `EdgeDelete`.** Sync layer
-  uses Cypher-conventional `Rel`; storage layer uses `Edge`. Internal
-  only today (the inconsistency never leaves the crate). v0.0.2
-  should pick one once the controller wire format is real.
-  *Source:* `crates/motif-core/src/sync/mutation.rs:18-26`,
-  `crates/motif-core/src/record.rs:21-25`. Logged from PR #1 review
-  (finding 1).
+  safety test in the next audit pass.
+  *Source:* `crates/motif-core/src/engine.rs` (`commit`).
 - `[debt]` **`MutationLog::record` uses `.expect("poisoned")` on the
   mutex.** Single-threaded today; if a future alpha adds parallel
   writers, a panic on a previous lock holder propagates. Either keep
