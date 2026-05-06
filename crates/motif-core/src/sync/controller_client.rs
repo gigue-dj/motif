@@ -59,19 +59,19 @@ impl ControllerClient for InMemoryControllerClient {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{ActorId, MutationKind};
+    use super::super::{ActorId, MutationOp};
     use super::*;
+    use crate::graph::Node;
 
     fn sample_mutation(seq: u64) -> Mutation {
         Mutation {
             local_seq: seq,
-            kind: MutationKind::NodeInsert,
             actor: ActorId {
                 user_id: "u".into(),
                 device_id: "d".into(),
             },
-            table_name: "Person".into(),
-            wal_payload: vec![1, 2, 3],
+            foreshadow: true,
+            op: MutationOp::NodeInsert(Node::new(format!("n{seq}"), "Person")),
         }
     }
 
