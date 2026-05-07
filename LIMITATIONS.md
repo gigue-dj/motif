@@ -56,10 +56,36 @@ pass can grep its way to the source.
 > schema_cache=fetch (post-v0.0.2), hoverphone profile (v0.0.3),
 > capability auto-discovery (v0.0.3).
 >
-> Still on the backlog below: PR #1 findings 4 (id-predicate inside AND
-> chain), 5 (unary minus), 6 (`Storage::truncate` header guard), 7
-> (`MutationLog::record` poison-mutex). v0.0.2 debt: WASM size jump
-> from the wasm-worker deps; unvalidated `controller.kind`.
+> **v0.0.2-alpha.5 retired (audit pass — closed by code fix):**
+> PR #1 finding 4 (`extract_id_predicate` only matched a top-level
+> `id(n) = X`) — interpreter now walks `AND` chains via a recursive
+> helper. PR #1 finding 6 (`Storage::truncate` lacked a header guard) —
+> both `FileStorage` and `MemoryStorage` now reject
+> `new_len < HEADER_LEN` with `StorageError::TruncateBelowHeader`.
+> PR #1 finding 7 (`MutationLog::record` mutex poison) — all locks now
+> use `lock_recover()` (`PoisonError::into_inner`). Controller-kind
+> validation: `Engine::with_named_controller(c, kind)` lands and
+> returns `EngineError::ControllerKindMismatch` on mismatch. Replay-
+> from-disk gap: `Engine::replay_unconfirmed()` walks the persisted log
+> and re-feeds foreshadow=true mutations to a freshly wired controller.
+> Bench harness gained `--backend memory|file` and `--with-controller`
+> flags (closes the `motif-cli bench` file-backed scope item).
+>
+> **v0.0.2-alpha.5 knowingly accepted (audit pass — explicit accept,
+> deferred):** PR #1 finding 5 (unary minus) — trivial to add when the
+> expression layer needs arithmetic; no caller demands it yet. WASM
+> size jump from alpha.2 (~310 KB / 35% of 2 MiB budget) — staying well
+> under budget, microtask-trampoline investigation deferred to v0.0.3+
+> when a real bridge is wired. wasm sleep no-op — proper backoff costs
+> additional bundle weight; defer until a real wasm bridge needs it.
+> `EdgeConfig.foreshadow_eager = false` — buffer-mode is a v0.0.3+
+> design item; current `true`-only behaviour matches every existing
+> caller. `EdgeConfig.retention_confirmed_secs` — log compaction is
+> v0.0.3+ work. `EdgeConfig.schema_cache = "fetch"` — only `"push"` is
+> implemented; lazy-fetch is post-v0.0.2. `hoverphone` test profile —
+> needs an interleaved-test runner, lands in v0.0.3. `CapabilityConfig`
+> auto-discovery — hosts populate manually for v0.0.2; v0.0.3+ picks a
+> hardware-probe crate.
 
 ---
 
@@ -110,16 +136,19 @@ pass can grep its way to the source.
   bridge crate (or the host) interprets the string; conventional
   values are documented in `motif.toml.example`.
   *Source:* `crates/motif-core/src/config.rs` (`ControllerConfig`).
-- `[debt]` **`controller.kind` is unvalidated.** Motif-core silently
-  ignores typos (`kind = "in-mmemoy"` parses cleanly); only host /
-  bridge code can catch the mismatch. v0.0.2-alpha.5 audit pass adds
-  `Engine::with_named_controller(c, kind: &str)` that asserts the
-  wired controller's kind matches the config's, surfacing a
-  `ControllerKindMismatch` error. Until then, `kind` is purely
-  informational and silent typos are a real bug class — bridge crates
-  should validate against their known set.
-  *Source:* `crates/motif-core/src/config.rs` (`ControllerConfig`);
-  `MOTIF.md` decision 18.
+- `[scope]` **`controller.kind` validation is opt-in via
+  `Engine::with_named_controller`.** v0.0.2-alpha.5 closed the debt:
+  hosts that want kind-checking call
+  `Engine::with_named_controller(controller, kind)` instead of
+  `with_controller(controller)`, and motif returns
+  `EngineError::ControllerKindMismatch { declared, wired }` if the
+  config's `controller.kind` and the host's wired-kind string disagree.
+  Plain `with_controller` remains available for hosts that don't want
+  the check (or are testing against multiple controller stand-ins). The
+  `kind` string itself is still opaque — motif-core never enumerates
+  concrete bridges per MOTIF.md decision 18.
+  *Source:* `crates/motif-core/src/engine.rs`
+  (`with_named_controller`, `ControllerKindMismatch`).
 
 ## Storage (`motif-core::storage`, `motif-core::record`)
 
@@ -169,13 +198,12 @@ pass can grep its way to the source.
   `Null`, `Bool`, `I64`, `F64`, `String`. No timestamps, no blobs, no
   lists, no nested structs. Expanded when the query layer needs more.
   *Source:* `crates/motif-core/src/value.rs:1-13`.
-- `[debt]` **`Storage::truncate` does not enforce
-  `new_len >= HEADER_LEN`.** No reachable caller violates this today
-  (recovery initialises `last_good = HEADER_LEN`), but a defensive guard
-  prevents future misuse from corrupting the magic. ~3-line add when
-  v0.0.2 touches the storage layer.
-  *Source:* `crates/motif-core/src/storage.rs` (`FileStorage::truncate`,
-  `MemoryStorage::truncate`). Logged from PR #1 review (finding 6).
+- ~~`[debt]` `Storage::truncate` does not enforce
+  `new_len >= HEADER_LEN`~~ — **closed in v0.0.2-alpha.5.** Both
+  `FileStorage::truncate` and `MemoryStorage::truncate` now return
+  `StorageError::TruncateBelowHeader { new_len, header_len }` when a
+  caller would otherwise wipe the magic. Two new unit tests cover the
+  guard.
 
 ## Query (`motif-core::query`)
 
@@ -230,16 +258,16 @@ pass can grep its way to the source.
   pass should decide whether the interpreter rejects the query when
   edges reference the doomed node.
   *Source:* `crates/motif-core/src/query/interpreter.rs:143-160`.
-- `[perf]` **`extract_id_predicate` only matches a top-level
-  `id(n) = X`.** `MATCH (n) WHERE id(n) = $x AND n.foo = 1` falls back
-  to a full `iter_nodes()` scan instead of a constant-time index
-  lookup + secondary filter. v0.0.2 fix is to walk an `AND` chain for
-  the predicate; trivial change once a Conjunction normaliser exists.
-  *Source:* `crates/motif-core/src/query/interpreter.rs:216-241`.
-  Logged from PR #1 review (finding 4).
-- `[scope]` **No unary minus expression form.** `-10` parses as the
-  literal `Integer(-10)`; `-n.balance` does not parse. Acceptable for
-  v0.0.1; trivial to add when the expression layer grows arithmetic.
+- ~~`[perf]` `extract_id_predicate` only matches a top-level
+  `id(n) = X`~~ — **closed in v0.0.2-alpha.5.** A recursive
+  `extract_id_in_expr` helper walks `AND` chains so
+  `MATCH (n) WHERE id(n) = $x AND n.foo = 1` now hits the index fast
+  path with a secondary filter. Bench: file-backed +
+  with-controller p50 = 17.67 µs (well within budget).
+- `[scope]` **No unary minus expression form. *Knowingly accepted in
+  v0.0.2-alpha.5.*** `-10` parses as the literal `Integer(-10)`;
+  `-n.balance` does not parse. No caller needs arithmetic on properties
+  yet; trivial to add when the expression layer grows in v0.0.3+.
   *Source:* `crates/motif-core/src/query/lexer.rs` (`scan_number`
   entry path). Logged from PR #1 review (finding 5).
 
@@ -267,11 +295,12 @@ pass can grep its way to the source.
   live outside motif-core per MOTIF.md decision 18.
   *Source:* `crates/motif-core/src/sync/controller.rs`;
   `crates/motif-core/src/sync/worker.rs`.
-- `[debt]` **WASM size jumped 308 KB in alpha.2.** wasm-bindgen-futures
-  + futures-channel + futures-util + js-sys add ~310 KB after
-  `wasm-opt -Oz` (713 KB total vs alpha.1's 405 KB; 35% of the 2 MiB
-  budget). v0.0.3+ should investigate a hand-rolled microtask
-  trampoline to drop futures-util specifically.
+- `[debt]` **WASM size jumped 308 KB in alpha.2. *Knowingly accepted in
+  v0.0.2-alpha.5.*** wasm-bindgen-futures + futures-channel +
+  futures-util + js-sys add ~310 KB after `wasm-opt -Oz` (713 KB total
+  vs alpha.1's 405 KB; 35% of the 2 MiB budget). Plenty of headroom; a
+  hand-rolled microtask trampoline (drops futures-util) is v0.0.3+
+  work, motivated when a real wasm bridge actually pushes the budget.
   *Source:* `crates/motif-core/src/sync/worker.rs` (wasm impl);
   workspace deps.
 - `[scope]` **In-process reconnect: retry-with-backoff on every apply.**
@@ -284,45 +313,55 @@ pass can grep its way to the source.
   ordering preserved.
   *Source:* `crates/motif-core/src/sync/worker.rs`; `MOTIF.md`
   decision 12.
-- `[gap]` **No replay-from-disk after worker crash.** v0.0.2-alpha.4
-  retries within a live worker thread but doesn't survive the worker
-  thread itself dying. If the host wires a fresh controller after a
-  crash, foreshadow=true mutations on disk aren't re-fed.
-  `Engine::replay_unconfirmed()` lands in v0.0.2-alpha.5 audit pass.
-  *Source:* `crates/motif-core/src/engine.rs`; `MOTIF.md` alpha.5
-  milestone.
-- `[gap]` **wasm worker doesn't actually sleep on backoff.**
-  `wasm_sleep` is a `future::ready` no-op for v0.0.2-alpha.4 — adding
-  proper backoff requires `gloo-timers` or `web-sys::setTimeout`,
-  both of which add wasm-bundle weight we'd rather defer until a
-  real bridge needs it. The native worker uses real
-  `std::thread::sleep` and respects the backoff config.
+- ~~`[gap]` No replay-from-disk after worker crash~~ — **closed in
+  v0.0.2-alpha.5.** `Engine::replay_unconfirmed()` walks the persisted
+  log in offset order and re-feeds every foreshadow=true mutation
+  through the wired `MutationLog`. No-op when no controller is wired.
+  Tests cover the basic case, ordered insert+delete replay, and the
+  no-controller no-op. *Source:*
+  `crates/motif-core/src/engine.rs` (`replay_unconfirmed`);
+  `crates/motif-core/tests/audit_pass.rs`.
+- `[gap]` **wasm worker doesn't actually sleep on backoff.
+  *Knowingly accepted in v0.0.2-alpha.5.*** `wasm_sleep` is a
+  `future::ready` no-op — proper backoff requires `gloo-timers` or
+  `web-sys::setTimeout`, both of which add wasm-bundle weight we'd
+  rather defer until a real bridge needs it. The native worker uses
+  real `std::thread::sleep` and respects the backoff config; the
+  controller flow is correct on native, just busy on wasm.
   *Source:* `crates/motif-core/src/sync/worker.rs` (`wasm_sleep`).
-- `[gap]` **`EdgeConfig.foreshadow_eager = false` not yet enforced.**
-  v0.0.2-alpha.4 parses the field but always behaves as if `true`
-  (apply locally, mark foreshadow=true). Buffer-mode (wait for
-  controller confirm before applying locally) lands in alpha.5.
+- `[gap]` **`EdgeConfig.foreshadow_eager = false` not yet enforced.
+  *Knowingly accepted in v0.0.2-alpha.5.*** Parses the field but always
+  behaves as if `true` (apply locally, mark foreshadow=true). No caller
+  needs buffer-mode yet; lands when one does. Field stays on
+  `EdgeConfig` for forward-compatibility so existing `motif.toml`
+  files don't have to change.
   *Source:* `crates/motif-core/src/config.rs` (`EdgeConfig`).
-- `[gap]` **`EdgeConfig.retention_confirmed_secs` not yet enforced.**
-  Log compaction of confirmed mutations is alpha.5+ work; the field
-  is parsed and stored on the engine for forward-compatibility.
+- `[gap]` **`EdgeConfig.retention_confirmed_secs` not yet enforced.
+  *Knowingly accepted in v0.0.2-alpha.5.*** Log compaction of
+  confirmed mutations is v0.0.3+ work — needs a confirm-acknowledgement
+  protocol with the controller that we haven't designed yet. Field is
+  parsed and stored for forward-compatibility.
   *Source:* `crates/motif-core/src/config.rs` (`EdgeConfig`).
-- `[gap]` **`EdgeConfig.schema_cache = "fetch"` not implemented.**
-  Only `"push"` (controller pushes; motif caches the latest) works.
-  Lazy-fetch is post-v0.0.2.
+- `[gap]` **`EdgeConfig.schema_cache = "fetch"` not implemented.
+  *Knowingly accepted in v0.0.2-alpha.5.*** Only `"push"` (controller
+  pushes; motif caches the latest) works. Lazy-fetch is post-v0.0.2;
+  no caller needs it yet.
   *Source:* `crates/motif-core/src/config.rs` (`EdgeConfig`).
-- `[scope]` **`hoverphone` test profile deferred to v0.0.3.**
-  v0.0.2-alpha.4 stood up the `default` and `potato` profiles
-  (the latter via a `ThrottledStorage` wrapper that sleeps before
-  every storage op). `hoverphone` (artificially over-fast / unusual
-  scheduling) needs a more invasive primitive than a sleep wrapper —
-  probably an interleaved-test runner — and lands in v0.0.3+.
+- `[scope]` **`hoverphone` test profile deferred to v0.0.3.
+  *Knowingly accepted in v0.0.2-alpha.5.*** v0.0.2-alpha.4 stood up
+  `default` and `potato` (the latter via a `ThrottledStorage` wrapper
+  that sleeps before every storage op). `hoverphone` (artificially
+  over-fast / unusual scheduling) needs an interleaved-test runner —
+  more invasive than a sleep wrapper — and lands in v0.0.3+.
+  v0.0.2 exit criterion 11 carries forward into v0.0.3.
   *Source:* `crates/motif-core/tests/profiles.rs`; `MOTIF.md`
   decision 22.
-- `[gap]` **`CapabilityConfig` auto-discovery deferred to v0.0.3+.**
-  v0.0.2-alpha.4 stores the host-provided capability profile and
-  forwards it to `Controller::connect`, but motif-core does not
-  itself probe RAM / cores / arch. Hosts populate manually for now.
+- `[gap]` **`CapabilityConfig` auto-discovery deferred to v0.0.3+.
+  *Knowingly accepted in v0.0.2-alpha.5.*** v0.0.2-alpha.4 stores the
+  host-provided capability profile and forwards it to
+  `Controller::connect`, but motif-core does not itself probe RAM /
+  cores / arch. Hosts populate manually for now; v0.0.3+ picks a
+  hardware-probe crate.
   *Source:* `crates/motif-core/src/config.rs` (`CapabilityConfig`);
   `MOTIF.md` open question 1.
 - `[scope]` **`std::thread` is the default spawner; no host-provided
@@ -354,13 +393,12 @@ pass can grep its way to the source.
   current order is intentional. Document and lock in with a panic-
   safety test in the next audit pass.
   *Source:* `crates/motif-core/src/engine.rs` (`commit`).
-- `[debt]` **`MutationLog::record` uses `.expect("poisoned")` on the
-  mutex.** Single-threaded today; if a future alpha adds parallel
-  writers, a panic on a previous lock holder propagates. Either keep
-  the panic (single-writer is the documented model) or switch to
-  `lock().unwrap_or_else(|e| e.into_inner())` for poison recovery.
-  *Source:* `crates/motif-core/src/sync/mutation_log.rs`. Logged from
-  PR #1 review (finding 7).
+- ~~`[debt]` `MutationLog::record` uses `.expect("poisoned")` on the
+  mutex~~ — **closed in v0.0.2-alpha.5.** All locks now go through a
+  shared `lock_recover()` helper that calls
+  `PoisonError::into_inner` on poison, so a panic in a previous lock
+  holder no longer propagates to subsequent callers. Test
+  `record_recovers_from_poisoned_mutex` covers the path.
 - `[gap]` **No provisional / CRDT shadow layer.** Server-wins is the
   decision; the local-temp-override mechanism is a v0.0.2 design
   item.
@@ -389,10 +427,13 @@ pass can grep its way to the source.
   counter will under-report. Add an explicit per-instance counter in
   the audit pass.
   *Source:* `crates/motif-wasm/src/lib.rs` (`mutation_count`).
-- `[scope]` **`motif-cli bench` measures in-memory storage on
-  native.** Does not exercise `FileStorage` (and therefore not the
-  `fsync`-per-write cost). A separate file-backed bench is post-v0.0.1
-  — useful for the storage perf knob discussion in v0.0.2.
+- ~~`[scope]` `motif-cli bench` measures in-memory storage on
+  native~~ — **closed in v0.0.2-alpha.5.** `motif bench` now accepts
+  `--backend memory|file` and `--with-controller` flags; the
+  file-backed path exercises `FileStorage` (fsync per write) and the
+  controller-wired path measures the tee + worker channel. Smoke run:
+  file-backed + with-controller, 1k nodes, 1k lookups → p50 17.67 µs
+  (well within the 50 ms exit criterion).
   *Source:* `crates/motif-cli/src/main.rs` (`run_bench`).
 
 ## Operations / observability
@@ -460,5 +501,12 @@ combined pass:
    explicitly opens a release-blocking issue.
 
 The v0.0.1 audit pass happened in PR #1; findings 1, 2, 4, 5, 6, 7 from
-that review were accepted as deferrable and are tagged in this file as the
-v0.0.2 backlog. The same cadence applies between v0.0.1 and v0.0.2.
+that review were accepted as deferrable and tagged in this file as the
+v0.0.2 backlog. The v0.0.2 audit pass is v0.0.2-alpha.5 (this PR):
+findings 4, 6, 7 closed by code fix; finding 5 explicitly accepted.
+Plus v0.0.2's own debts: controller-kind validation closed
+(`with_named_controller`); replay-from-disk gap closed
+(`replay_unconfirmed`); WASM size, wasm sleep, foreshadow_eager,
+retention, schema_cache, hoverphone, capability auto-discovery all
+explicitly accepted with the reason inline. Same cadence applies
+between v0.0.2 and v0.0.3.

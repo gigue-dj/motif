@@ -55,6 +55,8 @@ pub enum StorageError {
         len: u64,
         expected: u64,
     },
+    #[error("truncate would corrupt the header: new_len {new_len} < HEADER_LEN {header_len}")]
+    TruncateBelowHeader { new_len: u64, header_len: u64 },
 }
 
 /// Append-only single-file storage. Writes go to the end; reads are by
@@ -78,6 +80,13 @@ pub trait Storage: Send {
     /// Truncate the store to `new_len` bytes. Used by the engine during
     /// recovery to drop a torn-write tail. Implementations must persist
     /// the truncation before returning.
+    ///
+    /// Caller invariant: `new_len >= HEADER_LEN`. Implementations
+    /// surface `StorageError::TruncateBelowHeader` if the caller would
+    /// truncate into the magic / format-version header (closes PR #1
+    /// review finding 6 — the engine recovery path always passes a
+    /// safe value, but the guard keeps future misuse from corrupting
+    /// the header).
     fn truncate(&mut self, new_len: u64) -> Result<(), StorageError>;
 }
 
@@ -220,6 +229,12 @@ impl Storage for FileStorage {
     }
 
     fn truncate(&mut self, new_len: u64) -> Result<(), StorageError> {
+        if new_len < HEADER_LEN {
+            return Err(StorageError::TruncateBelowHeader {
+                new_len,
+                header_len: HEADER_LEN,
+            });
+        }
         self.file.set_len(new_len).map_err(|e| StorageError::Io {
             path: self.path.clone(),
             source: e,
@@ -280,6 +295,12 @@ impl Storage for MemoryStorage {
     }
 
     fn truncate(&mut self, new_len: u64) -> Result<(), StorageError> {
+        if new_len < HEADER_LEN {
+            return Err(StorageError::TruncateBelowHeader {
+                new_len,
+                header_len: HEADER_LEN,
+            });
+        }
         self.bytes.truncate(new_len as usize);
         Ok(())
     }
@@ -339,5 +360,27 @@ mod tests {
         std::fs::write(&path, [0u8; HEADER_LEN as usize]).unwrap();
         let err = FileStorage::open(&path).unwrap_err();
         assert!(matches!(err, StorageError::BadMagic(_)));
+    }
+
+    #[test]
+    fn truncate_below_header_is_rejected_memory() {
+        let mut s = MemoryStorage::new();
+        let err = s.truncate(0).unwrap_err();
+        assert!(matches!(err, StorageError::TruncateBelowHeader { .. }));
+        let err = s.truncate(HEADER_LEN - 1).unwrap_err();
+        assert!(matches!(err, StorageError::TruncateBelowHeader { .. }));
+        // At-or-above-HEADER_LEN: ok.
+        s.truncate(HEADER_LEN).unwrap();
+    }
+
+    #[test]
+    fn truncate_below_header_is_rejected_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("guard.motif");
+        let mut s = FileStorage::open(&path).unwrap();
+        let err = s.truncate(0).unwrap_err();
+        assert!(matches!(err, StorageError::TruncateBelowHeader { .. }));
+        // The file's still intact; reopen succeeds.
+        let _ = FileStorage::open(&path).unwrap();
     }
 }

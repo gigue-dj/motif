@@ -11,7 +11,7 @@
 //! (the persisted source of truth) must agree with what the controller
 //! eventually sees.
 
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use super::Mutation;
 
@@ -30,6 +30,21 @@ struct Inner {
     forwarder: Option<Forwarder>,
 }
 
+/// Lock the inner mutex, recovering gracefully from a poisoned state.
+///
+/// v0.0.2-alpha.5 closes PR #1 review finding 7: the previous
+/// `.expect("poisoned")` propagated a panic into anyone calling
+/// `MutationLog::record`, which on the engine commit path is a poor
+/// failure mode. A poisoned mutex here means a previous holder
+/// panicked; the data inside (a `Vec<Mutation>` plus an
+/// `Option<Box<dyn Fn(_)>>`) is still structurally valid, just
+/// possibly not in the state the panic expected. For the
+/// MutationLog's append-only / forwarder-replace semantics it is
+/// safe to recover from poison and keep going.
+fn lock_recover<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 impl MutationLog {
     pub fn new() -> Self {
         Self::default()
@@ -39,7 +54,7 @@ impl MutationLog {
     /// the mutation goes through it; otherwise it lands in the in-memory
     /// buffer (which tests / startup-replay code can drain).
     pub fn record(&self, m: Mutation) {
-        let mut g = self.inner.lock().expect("poisoned");
+        let mut g = lock_recover(&self.inner);
         match &g.forwarder {
             Some(f) => f(m),
             None => g.buffer.push(m),
@@ -50,25 +65,25 @@ impl MutationLog {
     /// caller chooses whether to drain them via `take_buffer` and
     /// re-apply.
     pub fn set_forwarder(&self, f: Forwarder) {
-        self.inner.lock().expect("poisoned").forwarder = Some(f);
+        lock_recover(&self.inner).forwarder = Some(f);
     }
 
     /// True iff a forwarder is currently wired. Useful for tests that
     /// want to assert the worker spawned successfully.
     pub fn has_forwarder(&self) -> bool {
-        self.inner.lock().expect("poisoned").forwarder.is_some()
+        lock_recover(&self.inner).forwarder.is_some()
     }
 
     /// Take everything currently buffered. Used by tests and by the
-    /// alpha.4 reconnect path that replays buffered mutations after the
+    /// alpha.5 reconnect path that replays buffered mutations after the
     /// controller worker comes back online.
     pub fn take_buffer(&self) -> Vec<Mutation> {
-        let mut g = self.inner.lock().expect("poisoned");
+        let mut g = lock_recover(&self.inner);
         std::mem::take(&mut g.buffer)
     }
 
     pub fn buffered_len(&self) -> usize {
-        self.inner.lock().expect("poisoned").buffer.len()
+        lock_recover(&self.inner).buffer.len()
     }
 }
 
@@ -155,5 +170,29 @@ mod tests {
         assert!(!log.has_forwarder());
         log.set_forwarder(Box::new(|_| {}));
         assert!(log.has_forwarder());
+    }
+
+    #[test]
+    fn record_recovers_from_poisoned_mutex() {
+        // Simulate a previous holder panicking inside the lock — the
+        // mutex is now poisoned. The post-alpha.5 lock_recover helper
+        // should pick up the inner data and let subsequent record()
+        // calls keep working. Closes PR #1 review finding 7.
+        let log = std::sync::Arc::new(MutationLog::new());
+        let log_for_panic = std::sync::Arc::clone(&log);
+        let _ = std::thread::spawn(move || {
+            log_for_panic.set_forwarder(Box::new(|_| {
+                panic!("holder panicked");
+            }));
+            log_for_panic.record(sample(1, MutationOp::NodeInsert(Node::new("x", "T"))));
+        })
+        .join();
+
+        // Worker thread panicked inside the forwarder closure; the
+        // lock is now poisoned. record() must not panic — it must
+        // recover the inner state and keep going. Replace the
+        // forwarder first so subsequent record() doesn't re-panic.
+        log.set_forwarder(Box::new(|_| {}));
+        log.record(sample(2, MutationOp::NodeInsert(Node::new("y", "T"))));
     }
 }

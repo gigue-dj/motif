@@ -54,6 +54,8 @@ pub enum EngineError {
         "unknown label {label}: not declared in the current schema (version {schema_version})"
     )]
     SchemaUnknown { label: String, schema_version: u64 },
+    #[error("controller kind mismatch: config declared {declared:?}, host wired {wired:?}")]
+    ControllerKindMismatch { declared: String, wired: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +113,13 @@ pub struct Engine {
     /// Drives the controller worker's retry/backoff in alpha.4; other
     /// fields are stored for future alphas.
     edge_config: EdgeConfig,
+    /// The `kind` the host declared in `MotifConfig::controller`. Held
+    /// so [`Engine::with_named_controller`] can verify the host wired
+    /// the controller they said they would, surfacing
+    /// `ControllerKindMismatch` on typos / drift. v0.0.2-alpha.5
+    /// closes the unvalidated-`kind` debt logged in PR #1 review
+    /// (alongside the LIMITATIONS entry).
+    declared_controller_kind: String,
 }
 
 impl Engine {
@@ -144,6 +153,7 @@ impl Engine {
             current_schema: None,
             capability: config.capability.clone(),
             edge_config: config.edge.clone(),
+            declared_controller_kind: config.controller.kind.clone(),
         };
         engine.recover()?;
         Ok(engine)
@@ -179,6 +189,30 @@ impl Engine {
         );
         self.mutation_log = Some(log);
         self
+    }
+
+    /// Like [`Engine::with_controller`], but also asserts that the
+    /// host's declared controller name matches the `kind` field from
+    /// `motif.toml`'s `[controller]` section. Catches silent typos —
+    /// the kind is opaque to motif-core (so any string parses), but
+    /// hosts that wire a specific controller can opt in to verifying
+    /// they got the one they expected.
+    ///
+    /// Returns `EngineError::ControllerKindMismatch` if the strings
+    /// differ. v0.0.2-alpha.5 closes the unvalidated-`kind` debt
+    /// logged in PR #1 review.
+    pub fn with_named_controller<C: crate::sync::Controller>(
+        self,
+        controller: C,
+        kind: &str,
+    ) -> Result<Self, EngineError> {
+        if self.declared_controller_kind != kind {
+            return Err(EngineError::ControllerKindMismatch {
+                declared: self.declared_controller_kind.clone(),
+                wired: kind.to_owned(),
+            });
+        }
+        Ok(self.with_controller(controller))
     }
 
     /// Read-only access to the host's reported capability profile.
@@ -525,6 +559,55 @@ impl Engine {
     /// per MOTIF.md decision 19 (metadata-as-data).
     pub fn is_foreshadow(&self, id: &str) -> bool {
         self.index.get(id).map(|e| e.foreshadow).unwrap_or(false)
+    }
+
+    /// Re-feed every foreshadow=true mutation from the persisted log
+    /// to the wired controller. Use after wiring a fresh controller
+    /// (e.g. on engine reopen, or after a worker thread crashes) so
+    /// the controller catches up on whatever was committed locally
+    /// but not yet acknowledged.
+    ///
+    /// Walks the on-disk log in `local_seq` order so the controller
+    /// sees inserts → deletes in the same sequence the local engine
+    /// did. Returns the number of mutations re-fed. Returns 0 (and
+    /// does no work) if no `MutationLog` is wired.
+    ///
+    /// v0.0.2 has no controller-confirms flow yet, so every mutation
+    /// is foreshadow=true forever after the first commit. Callers
+    /// should invoke `replay_unconfirmed` once after wiring a fresh
+    /// controller, not in a loop. v0.0.3 confirmation tracking will
+    /// flip foreshadow=false on ack and make this idempotent.
+    pub fn replay_unconfirmed(&mut self) -> Result<usize, EngineError> {
+        if self.mutation_log.is_none() {
+            return Ok(0);
+        }
+        let total = self.storage.len();
+        let mut cursor: u64 = HEADER_LEN;
+        let mut replayed: usize = 0;
+        while cursor < total {
+            let remaining = (total - cursor) as usize;
+            if remaining < LEN_PREFIX_BYTES {
+                break;
+            }
+            let len_bytes = self.storage.read_at(cursor, LEN_PREFIX_BYTES)?;
+            let payload_len =
+                u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]);
+            let total_record = LEN_PREFIX_BYTES + payload_len as usize;
+            if remaining < total_record {
+                break;
+            }
+            let frame = self.storage.read_at(cursor, total_record)?;
+            if let Some((mutation, _)) = decode_framed(&frame)? {
+                if mutation.foreshadow {
+                    if let Some(log) = &self.mutation_log {
+                        log.record(mutation);
+                        replayed += 1;
+                    }
+                }
+            }
+            cursor += total_record as u64;
+        }
+        Ok(replayed)
     }
 
     pub fn node_count(&self) -> usize {

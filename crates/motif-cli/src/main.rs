@@ -3,21 +3,33 @@
 //! Subcommands:
 //!   motif version
 //!   motif print-config <path-to-motif.toml>
-//!   motif bench [--nodes N] [--lookups M]   — id-lookup latency harness
+//!   motif bench [--nodes N] [--lookups M] [--backend memory|file]
+//!               [--with-controller]
+//!     id-lookup latency harness; v0.0.2-alpha.5 added file-backed and
+//!     with-controller modes per MOTIF.md alpha.5 bench-extension item.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
 use motif_core::{
-    ControllerConfig, Engine, IdentityConfig, MotifConfig, Node, Params, StorageConfig, Value,
+    ControllerConfig, Engine, IdentityConfig, InMemoryController, MotifConfig, Node, Params,
+    StorageConfig, Value,
 };
+use tempfile::TempDir;
 
 const USAGE: &str = "\
 usage:
   motif version
   motif print-config <path-to-motif.toml>
-  motif bench [--nodes N] [--lookups M]";
+  motif bench [--nodes N] [--lookups M] [--backend memory|file]
+              [--with-controller]";
+
+#[derive(Debug, Clone, Copy)]
+enum Backend {
+    Memory,
+    File,
+}
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -53,14 +65,24 @@ fn main() -> ExitCode {
         "bench" => {
             let mut nodes = 1_000usize;
             let mut lookups = 1_000usize;
+            let mut backend = Backend::Memory;
+            let mut with_controller = false;
             while let Some(arg) = args.next() {
                 match arg.as_str() {
-                    "--nodes" => {
-                        nodes = parse_usize(&mut args, "--nodes");
+                    "--nodes" => nodes = parse_usize(&mut args, "--nodes"),
+                    "--lookups" => lookups = parse_usize(&mut args, "--lookups"),
+                    "--backend" => {
+                        backend = match args.next().as_deref() {
+                            Some("memory") => Backend::Memory,
+                            Some("file") => Backend::File,
+                            other => {
+                                eprintln!("invalid --backend value: {other:?}");
+                                eprintln!("{USAGE}");
+                                return ExitCode::from(2);
+                            }
+                        };
                     }
-                    "--lookups" => {
-                        lookups = parse_usize(&mut args, "--lookups");
-                    }
+                    "--with-controller" => with_controller = true,
                     other => {
                         eprintln!("unknown bench flag: {other}");
                         eprintln!("{USAGE}");
@@ -68,7 +90,7 @@ fn main() -> ExitCode {
                     }
                 }
             }
-            run_bench(nodes, lookups)
+            run_bench(nodes, lookups, backend, with_controller)
         }
         other => {
             eprintln!("unknown command: {other}");
@@ -86,7 +108,7 @@ fn parse_usize<I: Iterator<Item = String>>(args: &mut I, label: &str) -> usize {
         .unwrap_or_else(|_| panic!("{label} must be a non-negative integer"))
 }
 
-fn bench_config() -> MotifConfig {
+fn bench_config(path: PathBuf) -> MotifConfig {
     MotifConfig {
         identity: IdentityConfig {
             user_id: "bench".into(),
@@ -95,17 +117,31 @@ fn bench_config() -> MotifConfig {
         controller: ControllerConfig {
             kind: "in-memory".into(),
         },
-        storage: StorageConfig {
-            path: PathBuf::from(":memory:"),
-        },
+        storage: StorageConfig { path },
         capability: Default::default(),
         edge: Default::default(),
     }
 }
 
-fn run_bench(nodes: usize, lookups: usize) -> ExitCode {
-    let cfg = bench_config();
-    let mut engine = Engine::open_in_memory(&cfg).expect("open in-memory");
+fn run_bench(nodes: usize, lookups: usize, backend: Backend, with_controller: bool) -> ExitCode {
+    // Hold the TempDir for the file backend so the file lives until
+    // the bench finishes; the variable is otherwise unused.
+    let _tmp = match backend {
+        Backend::Memory => None,
+        Backend::File => Some(TempDir::new().expect("tempdir")),
+    };
+    let cfg = match backend {
+        Backend::Memory => bench_config(PathBuf::from(":memory:")),
+        Backend::File => bench_config(_tmp.as_ref().unwrap().path().join("bench.db")),
+    };
+
+    let mut engine = match backend {
+        Backend::Memory => Engine::open_in_memory(&cfg).expect("open in-memory"),
+        Backend::File => Engine::open(&cfg).expect("open file-backed"),
+    };
+    if with_controller {
+        engine = engine.with_controller(InMemoryController::new());
+    }
 
     // Seed.
     let seed_start = Instant::now();
@@ -121,8 +157,9 @@ fn run_bench(nodes: usize, lookups: usize) -> ExitCode {
     }
     let seed_ms = seed_start.elapsed().as_secs_f64() * 1000.0;
 
-    // Lookup loop. Use the id() fast path through the query layer so the
-    // measurement covers the parser + interpreter + index + storage read.
+    // Lookup loop. Uses the id() fast path through the query layer so
+    // the measurement covers parser + interpreter + index + storage
+    // read.
     let query = "MATCH (n) WHERE id(n) = $x RETURN n";
     let mut samples: Vec<f64> = Vec::with_capacity(lookups);
     let mut params = Params::new();
@@ -146,7 +183,19 @@ fn run_bench(nodes: usize, lookups: usize) -> ExitCode {
     let p99 = p(0.99);
     let mean = samples.iter().sum::<f64>() / samples.len() as f64;
 
-    println!("motif bench (in-memory storage, native target)");
+    let backend_label = match backend {
+        Backend::Memory => "in-memory",
+        Backend::File => "file-backed (fsync per write)",
+    };
+    let controller_label = if with_controller {
+        "in-memory controller (worker thread + channel)"
+    } else {
+        "no controller"
+    };
+
+    println!("motif bench (native target)");
+    println!("  backend ............. {backend_label}");
+    println!("  controller .......... {controller_label}");
     println!("  nodes seeded ........ {nodes}");
     println!("  lookups ............. {lookups}");
     println!("  seed time ........... {seed_ms:.2} ms");
