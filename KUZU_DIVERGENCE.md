@@ -29,8 +29,23 @@ on the design dial because the constraints are different:
   embed the same artifact via a wasm runtime.
 
 Where Kuzu optimised for "lots of data, complex queries on a
-laptop / server," Motif optimises for "tiny working set, simple queries
-on a phone, controller-corrected on the wire."
+laptop / server," Motif optimises for "small working set, simple
+queries on a phone, controller-corrected on the wire."
+
+### Scale target (gigue-driven)
+
+Polypartite graph in B2B collaboration contexts (gigue's specific
+implementation will be a user- or edge-scoped subgraph — hence the
+name). Per-device working set:
+
+- **1k–10k nodes** (the original Kuzu-blueprint target).
+- **100k–1M+ edges** at scale. Edge count significantly outpaces
+  node count.
+
+That asymmetry has design consequences. Edge label + property
+indexes graduate to North-Star tier in the v0.0.4 milestone (see
+`MOTIF.md`); O(N) edge scans don't survive the upper bound. The
+indexes row below reflects current state vs target state.
 
 ## Subsystem-by-subsystem
 
@@ -40,13 +55,13 @@ on a phone, controller-corrected on the wire."
 |---|---|---|
 | Columnar disk-based storage with buffer manager, segments, vectorised page layout. Multiple files (catalog + data + WAL + shadow). | Single-file append-only Mutation log; 16-byte header, length-prefixed bincode records. In-memory `id → offset` index rebuilt on open. | Mobile budget: <2 MB binary, <100 KB working set is realistic. Buffer manager + segments are overkill. The single file is also a friendly artifact for sandboxed app-data directories on iOS / Android. |
 | Bespoke on-disk format with index hashing for `UINT128`, dictionary compression, etc. | bincode (serde) with a pinned config. No compression. | We ship far less data and far less variety. |
-| Crash safety via WAL + shadow files + checkpoint. | No WAL beyond the append log itself. Torn-write recovery via bincode decode-error truncation. | Single-writer + per-write fsync gives mobile-grade durability without the complexity. CRC + crash-safety semantics are tracked in `LIMITATIONS.md` for v0.0.3+. |
+| Crash safety via WAL + shadow files + checkpoint. | No WAL beyond the append log itself. Torn-write recovery via bincode decode-error truncation. | Single-writer + per-write fsync gives mobile-grade durability without the complexity. CRC + improved crash-safety semantics land in v0.0.5 alongside encryption-at-rest — both are storage-layer touches. |
 
 ### Query engine
 
 | Kuzu | Motif | Why |
 |---|---|---|
-| Full openCypher: planner → optimiser → vectorised executor with morsel-driven parallelism and factorised intermediate state. | Hand-rolled lexer + recursive-descent parser + AST-walking interpreter. No planner, no optimiser. The AST is the plan. | Most local-cache reads are by-id lookups. Constant-time fast path (`WHERE id(n) = $x`) covers the hot path; O(N) scan for everything else is fine at expected scale (1k-10k nodes). |
+| Full openCypher: planner → optimiser → vectorised executor with morsel-driven parallelism and factorised intermediate state. | Hand-rolled lexer + recursive-descent parser + AST-walking interpreter. No planner, no optimiser. The AST is the plan. | Most local-cache reads are by-id lookups. Constant-time fast path (`WHERE id(n) = $x`) covers the hot path through v0.0.3. v0.0.4 grows label + property indexes (nodes AND edges) — see the indexes row — so non-id MATCH stays sub-linear at the gigue B2B target (100k–1M+ edges). |
 | Multi-statement queries, `WITH` clause, `OPTIONAL MATCH`, list comprehensions, subqueries, `CALL`, aggregation, `ORDER BY`, grouping. | Single-statement subset: `CREATE`, `MATCH` + `WHERE` + `RETURN` + `LIMIT`, `MERGE` (no-op-on-hit), `MATCH ... DELETE`. | Targeted at "bind a parameter, fetch the row." Anything else is the controller's problem. |
 | Multi-pattern `MATCH (a)-[r]->(b)`, edges queryable, properties on relationships. | Single bound variable per statement. Edges not queryable from Cypher (only via the engine API). | One thing well; multi-pattern join planning belongs in the controller. |
 | Rich expression layer: arithmetic, list / map / struct comprehensions, regex, full-text MATCH. | `=` `!=` `<` `>` `<=` `>=` `AND` `OR` `NOT`, the `id(n)` builtin, integer / float / string / bool / null literals. Three-valued logic for `Null`. | Cypher's full surface is huge; we ship the slice queries actually need. |
@@ -62,7 +77,7 @@ on a phone, controller-corrected on the wire."
 
 | Kuzu | Motif | Why |
 |---|---|---|
-| Hash index, vector index, full-text search, sparse-row CSR adjacency for joins. | One id index (`HashMap<String, IndexEntry>`) shared across nodes and edges. | Vector / FTS / specialised joins are explicit `[scope]` cuts, listed in `LIMITATIONS.md`. We don't ship them; controller bridges that need them route the relevant queries upstream. |
+| Hash index, vector index, full-text search, sparse-row CSR adjacency for joins. | **Through v0.0.3:** one id index (`HashMap<String, IndexEntry>`) shared across nodes and edges. **v0.0.4 splits node and edge namespaces and adds label + property indexes for both.** Vector / FTS / specialised joins remain explicit `[scope]` cuts. | The shared map is fine for the v0.0.2 by-id hot path; the gigue B2B target (100k–1M+ edges) makes O(N) edge scans non-negotiable, so the v0.0.4 milestone graduates real edge indexes alongside the Cypher surface growth. Vector / FTS stay bridge concerns — controller bridges that need them route the relevant queries upstream. |
 
 ### Type system
 
@@ -102,16 +117,20 @@ path; the upstream Kuzu had nothing to port here.
 
 ## Performance comparison
 
-Not yet measured. v0.0.3+ should benchmark the by-id lookup path
-against an equivalent Kuzu query as a sanity check that we're at
-least within 10× the right ballpark for our scale targets. Motif's
-expected scale (1k-10k nodes) is far below where Kuzu's optimisations
-start mattering, so we expect the direct comparison to be unflattering
-on Kuzu's side at small N and unflattering on ours at large N — the
-crossover point is the actual interesting datum.
+Not yet measured. The v0.0.4 milestone ("Real Cypher queries at
+scale") includes a benchmark vs upstream Kuzu — by-id lookup path
+plus a representative non-id `MATCH` once edge indexes are in place.
+Sanity check: are we within 10× the right ballpark at the gigue B2B
+target (1k–10k nodes, 100k–1M+ edges)?
+
+We expect the direct comparison to be unflattering on Kuzu's side
+at small N (Motif has no buffer manager / no MVCC / no planner
+overhead) and unflattering on ours at large N (no vectorised
+executor, no morsel parallelism). The crossover point is the
+actual interesting datum.
 
 `motif bench` is the harness today (`--backend memory|file`,
-`--with-controller`); cross-engine comparison is post-v0.0.2.
+`--with-controller`); cross-engine comparison lands in v0.0.4.
 
 ## What we kept
 

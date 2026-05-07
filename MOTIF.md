@@ -118,6 +118,11 @@ ordinary Cypher just like data.
 | **0.0.2-alpha.4** | **Worker state machine + config knobs + test profiles.** `Controller` trait grows `connect(&CapabilityConfig)` lifecycle hook + Result-returning `apply`; new `ControllerError { Transient, Permanent }`. Worker drives `connect → loop {apply with exp-backoff on Transient}`, capped by `EdgeConfig.controller_retry_max_backoff_ms`. `MotifConfig.capability` + `MotifConfig.edge` real now (parsed; retry knobs live, other knobs penciled). `default` + `potato` test profiles via `ThrottledStorage` wrapper; `hoverphone` deferred to v0.0.3. 77 tests; replay-from-disk after worker crash deferred to alpha.5. | ✅ shipped |
 | **0.0.2-alpha.5** | **Audit pass.** PR #1 findings 4 (`extract_id_predicate` walks `AND` chains), 6 (`Storage::truncate` header guard), 7 (`MutationLog` poison recovery via `lock_recover()`) closed by code fix; finding 5 (unary minus) explicitly accepted. `Engine::with_named_controller(c, kind)` adds opt-in `controller.kind` validation (returns `ControllerKindMismatch` on a typo). `Engine::replay_unconfirmed()` walks the persisted log and re-feeds foreshadow=true mutations to a freshly wired controller after a crash. `motif bench` gained `--backend memory\|file` + `--with-controller` flags (file+controller smoke: p50 = 17.67 µs). New top-level `KUZU_DIVERGENCE.md` catalogues what we cut from upstream Kuzu by subsystem (storage, query, concurrency, indexes, types, catalog). LIMITATIONS.md sweep: fixed items retired, deferred items explicitly accepted with reasons inline. 85 tests (48 unit + 37 integration; +5 audit_pass over alpha.4). | ✅ shipped |
 | **v0.0.2** | Tag — once alpha.5 lands. | ready |
+| **v0.0.3** | **"Run on a real device" — North Star: a host on iOS / Android / edge ships an app that actually persists, with measurable cold-start.** Wasm storage shim (OPFS / app sandbox / wasm-bindgen-driven I/O); `Spawner` trait so hosts opt into platform runtimes (iOS GCD, Android coroutines); native `cdylib` evaluation for `aarch64-apple-ios` + `aarch64-linux-android` (via `uniffi` or direct cdylib — decision in alpha.1 of the release); wasm sleep via `gloo-timers` / `web-sys::setTimeout`; cold-start measurement harness; `tracing` crate with no-op default subscriber; `[capability]` auto-discovery (RAM / cores / arch probe). | planned |
+| **v0.0.4** | **"Real Cypher queries at scale" — North Star: apps express queries without falling back to engine API, on graphs sized the way gigue actually uses them.** Edge queries `MATCH (a)-[r]->(b)`; multi-pattern `MATCH`; `DETACH DELETE` / cascade; property type expansion (timestamps + lists at minimum); property-type validation against schema; `ORDER BY` + simple aggregates (`count`, `collect`); edge label + property indexes (graduated from "alpha.5+ work" — gigue B2B target makes O(N) edge scans non-negotiable); ID-namespace split (nodes / edges separate); `foreshadow_eager = false` buffer mode; `schema_cache = "fetch"` lazy fetch; performance benchmark vs upstream Kuzu. **First crates.io publish** for `motif-core` / `motif-wasm` / `motif-cli` with a pre-v0.1 "fluid API; expect breakage" README note — public-but-not-frozen API surface. | planned |
+| **v0.0.5** | **"Hostile-device-aware" — North Star: auth + encryption are real, host policy is honoured, no quiet escape hatches.** New `[security]` TOML section: `require_authenticated_channel`, `min_aead`, `pq_required`, suite allow-list. Bridges advertise their crypto suite at handshake; motif validates declared-vs-policy and surfaces `ControllerSecurityError` on mismatch. Opt-out is explicitly named `Engine::dangerously_*` (Rust convention). SOTA-classical allow-list (X25519, ChaCha20-Poly1305, AES-GCM) is B2B table stakes. **PQ forward-compat plumbing** — Signal-PQXDH-style scanner, fail-visible when host requires PQ but bridge doesn't advertise; PQ implementation itself is stretch. Host token-issuance and controller key-rotation flows documented + tested. Encryption-at-rest design + impl. CRC on records. Tee panic-safety test. | planned |
+| **v0.0.6** | **"Scale and operate" — North Star: confidence at the gigue B2B target (1M+ edges) and observability that survives a long-lived edge service.** Scale benchmarks at 1M edges + 10k nodes (p50 / p95 / p99 across query, insert, replay); `retention_confirmed_secs` log compaction; disk-size optimization (compression of bincode payloads, dictionary if it pays); `hoverphone` test profile via interleaved-test runner (closes v0.0.2 exit criterion 11 carry-over); multi-tenant evaluation (multiple `Engine` instances per host); backup / restore / migration design; WASM-size microtask trampoline if the futures-util budget bites. | planned |
+| **v0.1.0** | **"OSS-ready" — North Star: external contributors `cargo add motif-core` with semver promises; first concrete bridge ships independently.** Public API freeze + audit; semver policy documented; first concrete bridge crate (the experience answers the `bridges/` vs `hubs/` partition question); bridge-author + hub-author guides; documentation pass (API docs, getting-started, deployment); `cpp-reference/` archived to a separate tag / repo. | planned |
 
 ## Exit criteria for v0.0.1
 
@@ -151,15 +156,186 @@ All satisfied at tag (see PR #1):
 
 `motif-surreal-bridge` (Gigue's job; lands separately). `motif-hub` / `motif-mcp` host-event layers (optional, separate). Any non-Cypher dialect support. Encryption-at-rest. Multi-tenant. Vector / FTS. Native targets (`aarch64-apple-ios`, `aarch64-linux-android`). Real JWT validation in motif (host's job). Cypher surface beyond v0.0.1 (no `ORDER BY`, no aggregates, no multi-pattern). Conflict-resolution beyond server-wins (no CRDTs, no OT). Public crates.io publish for `motif-core` / `motif-wasm` / `motif-cli`. Auto-discovery of `[capability]`. iOS/Android-specific bench profiles.
 
-## Open questions for v0.0.3+
+## Long-run strategy: v0.0.3 → v0.1.0
 
-1. **`[capability]` auto-discovery.** Manual config in v0.0.2; v0.0.3 should pick a Rust-ecosystem story for runtime hardware probing. Likely solved-problem in a small crate; just need to pick one.
-2. **Crates.io publication for `motif-core`.** When and under what semver promises? Ties to outside-contributor onboarding.
-3. **Multi-tenant.** Multiple databases per process? How does `[capability]` work when multiple Motif instances share a host?
-4. **Encryption-at-rest design.** Motif holds the key (insecure but simple) vs. host provides the key on every read (slow). Need a third option that works on hostile devices.
-5. **Native targets.** `aarch64-apple-ios` / `aarch64-linux-android` build pipelines. `uniffi`? Direct `cdylib`? Affects whether the wasm runtime tax is ever optional.
-6. **Bridge test parameterisation.** How do `default` / `potato` / `hoverphone` profiles get applied across multiple bridge crates without duplicating CI matrices?
-7. **`bridges/` vs `hubs/` partition.** First bridge and first hub will tell us whether the directory split is worth keeping or whether everything wants to be `motif-*-ext/` or similar.
+**Target:** an OSS-ready micro-graph-db capable of supporting
+enterprise-edge apps. Each minor has **one North Star**; debt that
+touches that theme hitchhikes; everything else waits. Decisions in
+this section supersede the loose "open questions for v0.0.3+" framing
+that lived here through v0.0.2 — items below are now committed to a
+release or explicitly parked.
+
+### Scale target (gigue-driven)
+
+Motif is designed for a **polypartite graph in B2B collaboration
+contexts** — gigue's specific implementation will be a user- and/or
+edge-scoped subgraph, hence the name. Per-device working set:
+
+- **1k–10k nodes** (the original Kuzu-blueprint target).
+- **100k–1M+ edges** at scale. Edge count significantly outpaces node
+  count.
+
+That asymmetry has design consequences. Edge label + property indexes
+are co-equal deliverables with the v0.0.4 Cypher work, not
+hitchhikers. Any `iter_edges()` O(N) scan path is debt to pay down,
+not a "fine at small N" caveat. `KUZU_DIVERGENCE.md`'s scale row
+reflects this.
+
+### v0.0.3 — "Run on a real device"
+
+Hosts on iOS / Android / edge ship apps that persist for real and
+measurable cold-start. The wasm-vs-native question gets evaluated
+end-to-end with both options on the table.
+
+- Wasm storage shim (OPFS / app sandbox / wasm-bindgen-driven I/O).
+- `Spawner` trait so hosts opt into platform runtimes (iOS GCD,
+  Android coroutines) instead of `std::thread` everywhere.
+- Native `cdylib` evaluation: `aarch64-apple-ios` + `aarch64-linux-android`
+  via `uniffi` or direct `cdylib`. Decision in alpha.1 of the release.
+- Wasm sleep via `gloo-timers` / `web-sys::setTimeout` (closes the
+  v0.0.2 wasm-sleep no-op).
+- Cold-start measurement harness; budget set in alpha.1.
+- `tracing` crate, no-op default subscriber. Required for cold-start
+  measurement and downstream observability.
+- `[capability]` auto-discovery (RAM / cores / arch / GPU probe).
+
+### v0.0.4 — "Real Cypher queries at scale" + first crates.io publish
+
+Apps express queries without falling back to engine API, on graphs
+sized the way gigue actually uses them. Indexes graduate to
+North-Star tier: O(N) on edges is unacceptable at the gigue B2B
+target.
+
+Cypher surface:
+
+- Edge queries `MATCH (a)-[r]->(b)`.
+- Multi-pattern `MATCH`.
+- `DETACH DELETE` / cascade semantics.
+- Property type expansion (timestamps + lists at minimum;
+  blobs / structs only when a query needs them).
+- Property-type validation against schema.
+- `ORDER BY` + simple aggregates (`count`, `collect`).
+- `foreshadow_eager = false` buffer mode (some queries need
+  consistent reads).
+- `schema_cache = "fetch"` lazy fetch.
+
+Indexes / scale:
+
+- **Edge label + property indexes** (not just nodes).
+- ID-namespace split: nodes and edges in separate maps.
+- Performance benchmark vs upstream Kuzu (penciled in
+  `KUZU_DIVERGENCE.md` since v0.0.2-alpha.5).
+
+Distribution:
+
+- Crates.io publish for `motif-core` / `motif-wasm` / `motif-cli`.
+- README "**pre-v0.1; fluid API; expect breakage**" note —
+  standard for serious 0.x crates.
+- Public-but-not-frozen API surface. v0.1.0 freezes; v0.0.x can
+  break.
+
+### v0.0.5 — "Hostile-device-aware"
+
+Auth + encryption become real. Motif imposes nothing — it inherits
+host and controller policy, validates that the bridge actually meets
+that policy, and refuses on mismatch. No quiet escape hatches.
+
+Security model:
+
+- New `[security]` TOML section. Host policy: `require_authenticated_channel`,
+  `min_aead`, `pq_required`, suite allow-list.
+- Bridges advertise their crypto suite at `Controller::connect`.
+  Motif validates declared-vs-policy.
+- Mismatch surfaces `ControllerSecurityError` to the host (downgrade
+  attack, weak suite, missing PQ when required).
+- Opt-out is explicitly `Engine::dangerously_*` (Rust convention you
+  flagged) — `dangerously_ingest_unencrypted_mutations` and friends.
+  No silent escape hatches.
+- SOTA-classical allow-list as B2B table stakes: X25519,
+  ChaCha20-Poly1305, AES-GCM.
+- **PQ forward-compat plumbing** — Signal-PQXDH-style scanner,
+  fail-visible when host requires PQ but bridge advertises classical-
+  only. PQ implementation itself is stretch; the *handshake shape*
+  must be PQ-aware so adopting Kyber768 / ML-KEM later is a bridge
+  upgrade, not a motif upgrade.
+
+Auth integration:
+
+- Host token-issuance flow documented + tested with a spec controller.
+- Controller key-rotation flow documented + tested.
+- Capability fields for TEE / secure-enclave context.
+
+Durability:
+
+- Encryption-at-rest design + impl.
+- CRC on records (closes the v0.0.2 [debt]).
+- Tee panic-safety test (LIMITATIONS [debt]).
+
+### v0.0.6 — "Scale and operate"
+
+Confidence at the gigue B2B target. Long-lived edge-service
+operability.
+
+Scale:
+
+- Benchmarks at 1M edges + 10k nodes; p50 / p95 / p99 across
+  query / insert / replay.
+- `retention_confirmed_secs` log compaction (closes the v0.0.2
+  pencil).
+- Disk-size optimization: bincode payload compression, dictionary
+  encoding for repeated label / property names if it pays.
+- Multi-tenant evaluation: multiple `Engine` instances per host
+  process.
+
+Operability:
+
+- `hoverphone` test profile via interleaved-test runner (closes
+  v0.0.2 exit criterion 11 carry-over).
+- Backup / restore / migration design.
+- WASM-size microtask trampoline if the futures-util budget bites
+  (currently 768 KB / 37.5% of 2 MiB).
+
+### v0.1.0 — "OSS-ready"
+
+External contributors `cargo add motif-core` with semver promises.
+First concrete bridge ships independently. The `bridges/` vs `hubs/`
+partition decision falls out of the experience.
+
+- Public API freeze + audit.
+- Semver policy documented.
+- First concrete bridge crate (likely SurrealDB; gigue drives
+  separately under `phrase-db` naming per decision 3).
+- Bridge-author + hub-author guides.
+- Documentation pass: API docs, getting-started, deployment.
+- `cpp-reference/` archived (separate tag / repo).
+
+### Parked indefinitely (post-v0.1.0)
+
+These appeared in v0.0.2 planning but have no destination yet:
+
+- **CRDT / provisional-shadow conflict resolution beyond server-wins.**
+  Server-wins is the v0.0.2 decision; revisit only if a real
+  device-conflict scenario forces it. Not enterprise-blocking.
+- **Bundled extension framework** (vector / FTS / etc.). Bridges,
+  always (decision 18).
+- **Multi-database per `Engine`.** Multi-tenant evaluation in v0.0.6
+  may recommend an architectural split instead of growing the engine.
+- **Browser-direct path / WASI runtimes.** Out of scope per
+  decision 2.
+- **Cypher beyond "query layer".** No transactions, no procedural
+  extensions, no `CALL`, no list-comprehensions. Bridges that need
+  that surface translate before talking to motif.
+
+## Open questions
+
+These wait on the first concrete bridge crate to answer:
+
+1. **Bridge test parameterisation.** How do `default` / `potato` /
+   `hoverphone` profiles get applied across multiple bridge crates
+   without duplicating CI matrices?
+2. **`bridges/` vs `hubs/` partition.** First bridge and first hub
+   will tell us whether the directory split is worth keeping or
+   whether everything wants to be `motif-*-ext/` or similar.
 
 ## Repository layout
 
