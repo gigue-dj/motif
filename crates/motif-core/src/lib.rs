@@ -17,6 +17,7 @@ pub mod engine;
 pub mod graph;
 pub mod query;
 pub mod record;
+pub mod schema;
 pub mod storage;
 pub mod sync;
 pub mod value;
@@ -25,9 +26,11 @@ pub use config::{ConfigError, ControllerConfig, IdentityConfig, MotifConfig, Sto
 pub use engine::{Engine, EngineError};
 pub use graph::{Edge, Node, Properties};
 pub use query::{Params, QueryError, QueryResult, ResultCell, Statement};
+pub use schema::{PropertyType, Schema, TableKind, TableSchema};
 pub use storage::{FileStorage, MemoryStorage, Storage, StorageError};
 pub use sync::{
-    spawn_controller_worker, ActorId, Controller, InMemoryController, InMemoryHandle, Mutation,
-    MutationLog, MutationOp, WorkerHandle,
+    spawn_controller_worker, ActorId, Controller, Mutation, MutationLog, MutationOp, WorkerHandle,
 };
+#[cfg(feature = "in-memory-controller")]
+pub use sync::{InMemoryController, InMemoryHandle};
 pub use value::Value;

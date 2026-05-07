@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::graph::{Edge, Node};
+use crate::schema::Schema;
 
 /// Identity of the actor who produced a mutation. Per-user + per-device
 /// because v0.0.1+ anticipates compromised / shared devices: the
@@ -30,25 +31,33 @@ pub enum MutationOp {
     EdgeInsert(Edge),
     NodeDelete(String),
     EdgeDelete(String),
+    /// Controller-pushed schema. The host (or bridge) calls
+    /// `Engine::apply_schema(s)`; the engine commits it as a
+    /// `SchemaApply` mutation so it lands on the persisted log and
+    /// gets teed to the controller worker like every other commit.
+    /// v0.0.2-alpha.3 added this variant; it is the last enum variant
+    /// to preserve bincode tag stability for the prior four.
+    SchemaApply(Schema),
 }
 
 impl MutationOp {
-    /// The id this operation targets. Used by the in-memory index and
-    /// by the foreshadow tracker.
-    pub fn target_id(&self) -> &str {
+    /// The id this graph op targets. `None` for non-graph ops like
+    /// [`MutationOp::SchemaApply`], which don't live in the id index.
+    pub fn target_id(&self) -> Option<&str> {
         match self {
-            MutationOp::NodeInsert(n) => &n.id,
-            MutationOp::EdgeInsert(e) => &e.id,
-            MutationOp::NodeDelete(id) | MutationOp::EdgeDelete(id) => id,
+            MutationOp::NodeInsert(n) => Some(&n.id),
+            MutationOp::EdgeInsert(e) => Some(&e.id),
+            MutationOp::NodeDelete(id) | MutationOp::EdgeDelete(id) => Some(id),
+            MutationOp::SchemaApply(_) => None,
         }
     }
 
-    /// Convenience: is this an insert (vs. a delete)?
+    /// Convenience: is this an insert (vs. a delete or schema)?
     pub fn is_insert(&self) -> bool {
         matches!(self, MutationOp::NodeInsert(_) | MutationOp::EdgeInsert(_))
     }
 
-    /// Convenience: does this target a node (vs. an edge)?
+    /// Convenience: does this target a node (vs. an edge or schema)?
     pub fn is_node(&self) -> bool {
         matches!(self, MutationOp::NodeInsert(_) | MutationOp::NodeDelete(_))
     }

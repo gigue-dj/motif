@@ -28,6 +28,7 @@ use crate::config::MotifConfig;
 use crate::graph::{Edge, Node};
 use crate::query::{self, Params, QueryError, QueryResult};
 use crate::record::{decode_framed, encode_framed, RecordError, LEN_PREFIX_BYTES};
+use crate::schema::Schema;
 use crate::storage::{FileStorage, MemoryStorage, Storage, StorageError, HEADER_LEN};
 use crate::sync::{ActorId, Mutation, MutationLog, MutationOp};
 
@@ -49,6 +50,10 @@ pub enum EngineError {
     },
     #[error("query error: {0}")]
     Query(#[from] QueryError),
+    #[error(
+        "unknown label {label}: not declared in the current schema (version {schema_version})"
+    )]
+    SchemaUnknown { label: String, schema_version: u64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,11 +90,16 @@ pub struct Engine {
     /// commit. Recovery rewinds it to one past the highest seen
     /// `local_seq` so subsequent commits stay strictly increasing.
     next_local_seq: u64,
-    /// Optional in-memory queue of foreshadowed mutations awaiting
-    /// controller confirmation. v0.0.2-alpha.1 just records into it; the
-    /// drain side lands in alpha.2 when the Controller trait + worker
-    /// thread arrive.
+    /// In-memory queue of foreshadowed mutations awaiting controller
+    /// confirmation. Wired by `with_controller`; alpha.4 will let the
+    /// Controller worker drain it.
     mutation_log: Option<Arc<MutationLog>>,
+    /// The latest controller-pushed schema applied to this engine.
+    /// `None` until a host or bridge calls [`Engine::apply_schema`].
+    /// When `None`, label validation is permissive (any label is
+    /// accepted); when `Some`, mutations against unknown labels surface
+    /// [`EngineError::SchemaUnknown`].
+    current_schema: Option<Schema>,
 }
 
 impl Engine {
@@ -120,6 +130,7 @@ impl Engine {
             },
             next_local_seq: 1,
             mutation_log: None,
+            current_schema: None,
         };
         engine.recover()?;
         Ok(engine)
@@ -218,29 +229,38 @@ impl Engine {
         Ok(())
     }
 
-    /// Apply a Mutation we just decoded during recovery to the in-memory
-    /// index. Each replayed mutation either installs / updates an index
-    /// entry or removes one.
+    /// Apply a Mutation we just decoded during recovery. Inserts /
+    /// deletes touch the id index; `SchemaApply` updates the engine's
+    /// current schema. Each path is idempotent under replay.
     fn apply_recovered(&mut self, m: &Mutation, offset: u64, payload_len: u32) {
         match &m.op {
-            MutationOp::NodeInsert(_) | MutationOp::EdgeInsert(_) => {
-                let kind = if m.op.is_node() {
-                    Kind::Node
-                } else {
-                    Kind::Edge
-                };
+            MutationOp::NodeInsert(n) => {
                 self.index.insert(
-                    m.op.target_id().to_owned(),
+                    n.id.clone(),
                     IndexEntry {
                         offset,
                         payload_len,
-                        kind,
+                        kind: Kind::Node,
+                        foreshadow: m.foreshadow,
+                    },
+                );
+            }
+            MutationOp::EdgeInsert(e) => {
+                self.index.insert(
+                    e.id.clone(),
+                    IndexEntry {
+                        offset,
+                        payload_len,
+                        kind: Kind::Edge,
                         foreshadow: m.foreshadow,
                     },
                 );
             }
             MutationOp::NodeDelete(id) | MutationOp::EdgeDelete(id) => {
                 self.index.remove(id);
+            }
+            MutationOp::SchemaApply(s) => {
+                self.current_schema = Some(s.clone());
             }
         }
     }
@@ -249,6 +269,7 @@ impl Engine {
         if self.index.contains_key(&node.id) {
             return Err(EngineError::DuplicateId(node.id));
         }
+        self.validate_label(&node.label)?;
         self.commit(MutationOp::NodeInsert(node))
     }
 
@@ -262,7 +283,47 @@ impl Engine {
         if !self.has_node(&edge.to) {
             return Err(EngineError::MissingNode(edge.to));
         }
+        self.validate_label(&edge.label)?;
         self.commit(MutationOp::EdgeInsert(edge))
+    }
+
+    /// Apply a controller-pushed schema. The schema is persisted via a
+    /// `MutationOp::SchemaApply` record on the on-disk log, so it
+    /// survives reopen, and is teed to the controller worker like any
+    /// other commit (most controllers ignore their own schema echoes
+    /// via the default `Controller::flush` no-op).
+    ///
+    /// v0.0.2-alpha.3 takes the whole schema atomically: a later
+    /// version supersedes the earlier one in its entirety. Incremental
+    /// schema migrations land in v0.0.3+.
+    pub fn apply_schema(&mut self, schema: Schema) -> Result<(), EngineError> {
+        // Persist + update in-memory state in one commit.
+        self.commit(MutationOp::SchemaApply(schema))
+    }
+
+    /// Read-only access to the latest applied schema. `None` if no
+    /// schema has been pushed; callers should treat that as
+    /// "permissive — accept any label".
+    pub fn current_schema(&self) -> Option<&Schema> {
+        self.current_schema.as_ref()
+    }
+
+    /// Reject mutations with labels that the current schema doesn't
+    /// know. Permissive when no schema is set (the controller hasn't
+    /// pushed one yet, or is operating without one — both valid in
+    /// v0.0.2-alpha.3).
+    fn validate_label(&self, label: &str) -> Result<(), EngineError> {
+        let Some(schema) = &self.current_schema else {
+            return Ok(());
+        };
+        if schema.has_label(label) {
+            Ok(())
+        } else {
+            Err(EngineError::SchemaUnknown {
+                label: label.to_owned(),
+                schema_version: schema.version,
+            })
+        }
     }
 
     /// Delete a node by id. v0.0.2 still does not enforce referential
@@ -304,27 +365,36 @@ impl Engine {
         let payload_len = (frame.len() - LEN_PREFIX_BYTES) as u32;
         let offset = self.storage.append(&frame)?;
 
-        // Update the in-memory index from the same Mutation we just
+        // Update in-memory state from the same Mutation we just
         // persisted, so on-disk state and in-memory state agree.
         match &m.op {
-            MutationOp::NodeInsert(_) | MutationOp::EdgeInsert(_) => {
-                let kind = if m.op.is_node() {
-                    Kind::Node
-                } else {
-                    Kind::Edge
-                };
+            MutationOp::NodeInsert(n) => {
                 self.index.insert(
-                    m.op.target_id().to_owned(),
+                    n.id.clone(),
                     IndexEntry {
                         offset,
                         payload_len,
-                        kind,
+                        kind: Kind::Node,
+                        foreshadow: m.foreshadow,
+                    },
+                );
+            }
+            MutationOp::EdgeInsert(e) => {
+                self.index.insert(
+                    e.id.clone(),
+                    IndexEntry {
+                        offset,
+                        payload_len,
+                        kind: Kind::Edge,
                         foreshadow: m.foreshadow,
                     },
                 );
             }
             MutationOp::NodeDelete(id) | MutationOp::EdgeDelete(id) => {
                 self.index.remove(id);
+            }
+            MutationOp::SchemaApply(s) => {
+                self.current_schema = Some(s.clone());
             }
         }
 

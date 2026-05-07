@@ -140,7 +140,7 @@ mod tests {
         let m = make(MutationOp::NodeDelete("doomed".into()), true);
         let framed = encode_framed(&m).unwrap();
         let (decoded, _) = decode_framed(&framed).unwrap().unwrap();
-        assert_eq!(decoded.op.target_id(), "doomed");
+        assert_eq!(decoded.op.target_id(), Some("doomed"));
     }
 
     #[test]

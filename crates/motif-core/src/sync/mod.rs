@@ -12,7 +12,9 @@ mod mutation;
 mod mutation_log;
 mod worker;
 
-pub use controller::{Controller, InMemoryController, InMemoryHandle};
+pub use controller::Controller;
+#[cfg(feature = "in-memory-controller")]
+pub use controller::{InMemoryController, InMemoryHandle};
 pub use mutation::{ActorId, Mutation, MutationOp};
 pub use mutation_log::MutationLog;
 pub use worker::{spawn_controller_worker, WorkerHandle};
