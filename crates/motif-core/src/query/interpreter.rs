@@ -231,24 +231,58 @@ fn extract_id_predicate(
     params: &Params,
 ) -> Result<Option<String>, InterpretError> {
     let Some(expr) = expr else { return Ok(None) };
-    if let Expr::Binary {
-        op: BinOp::Eq,
-        lhs,
-        rhs,
-    } = expr
-    {
-        let pair = match (&**lhs, &**rhs) {
-            (Expr::IdOf(v), other) | (other, Expr::IdOf(v)) if v == variable => Some(other),
-            _ => None,
-        };
-        if let Some(other) = pair {
-            let v = eval_const(other, params)?;
-            if let Value::String(s) = v {
-                return Ok(Some(s));
+    extract_id_in_expr(expr, variable, params)
+}
+
+/// Walk an expression looking for a top-level conjunction that
+/// contains an `id(n) = <scalar>` clause. v0.0.2-alpha.5 extends the
+/// id-predicate fast path through `AND` chains (closes PR #1 review
+/// finding 4) — `MATCH (n) WHERE id(n) = $x AND n.foo = 1` now hits
+/// the constant-time index lookup instead of falling back to a full
+/// `iter_nodes()` scan.
+///
+/// The walk is intentionally conservative:
+/// - Only top-level `AND` is descended (not `OR` — under disjunction
+///   we'd have to enumerate two id sets, which v0.0.2 doesn't do).
+/// - Only one id() match is honoured per query (the first match wins);
+///   `id(n) = $x AND id(n) = $y` is therefore equivalent to using the
+///   first scalar (which is fine — the second predicate is then
+///   re-checked in `eval_predicate` and filters out a non-match).
+fn extract_id_in_expr(
+    expr: &Expr,
+    variable: &str,
+    params: &Params,
+) -> Result<Option<String>, InterpretError> {
+    match expr {
+        Expr::Binary {
+            op: BinOp::Eq,
+            lhs,
+            rhs,
+        } => {
+            let pair = match (&**lhs, &**rhs) {
+                (Expr::IdOf(v), other) | (other, Expr::IdOf(v)) if v == variable => Some(other),
+                _ => None,
+            };
+            if let Some(other) = pair {
+                let v = eval_const(other, params)?;
+                if let Value::String(s) = v {
+                    return Ok(Some(s));
+                }
             }
+            Ok(None)
         }
+        Expr::Binary {
+            op: BinOp::And,
+            lhs,
+            rhs,
+        } => {
+            if let Some(found) = extract_id_in_expr(lhs, variable, params)? {
+                return Ok(Some(found));
+            }
+            extract_id_in_expr(rhs, variable, params)
+        }
+        _ => Ok(None),
     }
-    Ok(None)
 }
 
 /// Evaluate an expression that does not depend on a bound variable

@@ -212,6 +212,7 @@ name = "motif-cli"
 version = "0.0.1"
 dependencies = [
  "motif-core",
+ "tempfile",
 ]
 
 [[package]]
