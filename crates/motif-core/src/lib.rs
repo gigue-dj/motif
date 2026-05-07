@@ -22,14 +22,18 @@ pub mod storage;
 pub mod sync;
 pub mod value;
 
-pub use config::{ConfigError, ControllerConfig, IdentityConfig, MotifConfig, StorageConfig};
+pub use config::{
+    CapabilityConfig, ConfigError, ControllerConfig, EdgeConfig, IdentityConfig, MotifConfig,
+    StorageConfig,
+};
 pub use engine::{Engine, EngineError};
 pub use graph::{Edge, Node, Properties};
 pub use query::{Params, QueryError, QueryResult, ResultCell, Statement};
 pub use schema::{PropertyType, Schema, TableKind, TableSchema};
 pub use storage::{FileStorage, MemoryStorage, Storage, StorageError};
 pub use sync::{
-    spawn_controller_worker, ActorId, Controller, Mutation, MutationLog, MutationOp, WorkerHandle,
+    spawn_controller_worker, ActorId, Controller, ControllerError, Mutation, MutationLog,
+    MutationOp, WorkerHandle,
 };
 #[cfg(feature = "in-memory-controller")]
 pub use sync::{InMemoryController, InMemoryHandle};

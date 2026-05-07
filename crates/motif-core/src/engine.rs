@@ -24,7 +24,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::config::MotifConfig;
+use crate::config::{CapabilityConfig, EdgeConfig, MotifConfig};
 use crate::graph::{Edge, Node};
 use crate::query::{self, Params, QueryError, QueryResult};
 use crate::record::{decode_framed, encode_framed, RecordError, LEN_PREFIX_BYTES};
@@ -100,6 +100,17 @@ pub struct Engine {
     /// accepted); when `Some`, mutations against unknown labels surface
     /// [`EngineError::SchemaUnknown`].
     current_schema: Option<Schema>,
+    /// Per-instance capability profile copied from
+    /// `MotifConfig::capability`. Forwarded to the controller worker
+    /// at `Engine::with_controller` time so bridges can route based
+    /// on host facts (RAM, cores, etc.). v0.0.2-alpha.4 stores it;
+    /// v0.0.3+ may also expose it via the `_motif.capability.X`
+    /// metadata namespace once auto-discovery lands.
+    capability: CapabilityConfig,
+    /// Per-instance edge-strategy config copied from `MotifConfig::edge`.
+    /// Drives the controller worker's retry/backoff in alpha.4; other
+    /// fields are stored for future alphas.
+    edge_config: EdgeConfig,
 }
 
 impl Engine {
@@ -131,6 +142,8 @@ impl Engine {
             next_local_seq: 1,
             mutation_log: None,
             current_schema: None,
+            capability: config.capability.clone(),
+            edge_config: config.edge.clone(),
         };
         engine.recover()?;
         Ok(engine)
@@ -158,9 +171,26 @@ impl Engine {
     /// which causes the worker to flush and exit.
     pub fn with_controller<C: crate::sync::Controller>(mut self, controller: C) -> Self {
         let log = Arc::new(MutationLog::new());
-        let _handle = crate::sync::spawn_controller_worker(&log, controller);
+        let _handle = crate::sync::spawn_controller_worker(
+            &log,
+            controller,
+            self.capability.clone(),
+            self.edge_config.clone(),
+        );
         self.mutation_log = Some(log);
         self
+    }
+
+    /// Read-only access to the host's reported capability profile.
+    /// `None` of the inner `Option<>` fields just means the host
+    /// didn't declare that fact in the TOML; auto-discovery is v0.0.3+.
+    pub fn capability(&self) -> &CapabilityConfig {
+        &self.capability
+    }
+
+    /// Read-only access to the engine's edge-strategy config.
+    pub fn edge_config(&self) -> &EdgeConfig {
+        &self.edge_config
     }
 
     /// Test/inspection helper: read the current actor identity.
@@ -534,6 +564,8 @@ mod tests {
             storage: StorageConfig {
                 path: PathBuf::from(":memory:"),
             },
+            capability: Default::default(),
+            edge: Default::default(),
         }
     }
 
