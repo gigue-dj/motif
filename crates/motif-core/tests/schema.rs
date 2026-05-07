@@ -27,6 +27,8 @@ fn config_with(path: PathBuf) -> MotifConfig {
             kind: "in-memory".into(),
         },
         storage: StorageConfig { path },
+        capability: Default::default(),
+        edge: Default::default(),
     }
 }
 

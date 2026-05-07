@@ -98,6 +98,8 @@ fn bench_config() -> MotifConfig {
         storage: StorageConfig {
             path: PathBuf::from(":memory:"),
         },
+        capability: Default::default(),
+        edge: Default::default(),
     }
 }
 

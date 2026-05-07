@@ -46,11 +46,20 @@ pass can grep its way to the source.
 > InMemoryController, and unvalidated `controller.kind` (slated for
 > with_named_controller in alpha.5).
 >
+> **v0.0.2-alpha.4 added:** controller worker is now a state machine
+> with `connect → loop {apply with exp-backoff on Transient}` and a
+> richer `Controller` trait. `CapabilityConfig` + `EdgeConfig` parsed;
+> retry knobs live, other knobs penciled. `default` + `potato` test
+> profiles stood up (`ThrottledStorage` wrapper). New gaps logged for
+> replay-from-disk (alpha.5), wasm sleep (v0.0.3+),
+> foreshadow_eager=false (alpha.5), retention compaction (alpha.5),
+> schema_cache=fetch (post-v0.0.2), hoverphone profile (v0.0.3),
+> capability auto-discovery (v0.0.3).
+>
 > Still on the backlog below: PR #1 findings 4 (id-predicate inside AND
 > chain), 5 (unary minus), 6 (`Storage::truncate` header guard), 7
 > (`MutationLog::record` poison-mutex). v0.0.2 debt: WASM size jump
-> from the wasm-worker deps; no reconnect / offline-replay yet;
-> unvalidated `controller.kind`.
+> from the wasm-worker deps; unvalidated `controller.kind`.
 
 ---
 
@@ -265,13 +274,57 @@ pass can grep its way to the source.
   trampoline to drop futures-util specifically.
   *Source:* `crates/motif-core/src/sync/worker.rs` (wasm impl);
   workspace deps.
-- `[gap]` **No reconnect / offline-replay yet.** v0.0.2-alpha.2 wires
-  the worker but doesn't survive a worker crash or a controller
-  disconnect; mutations queued via the channel are dropped if the
-  receiver is gone. Reconnect + persisted-log replay land in
-  v0.0.2-alpha.4.
+- `[scope]` **In-process reconnect: retry-with-backoff on every apply.**
+  v0.0.2-alpha.4 grew the worker into a state machine: `connect`
+  once, then `apply` with exponential backoff (100ms doubling, capped
+  at `EdgeConfig.controller_retry_max_backoff_ms`) on
+  `ControllerError::Transient`. Permanent errors short-circuit
+  (mutation stays foreshadow=true on disk). Mutations queued during
+  the retry window stack up in the channel and drain after recovery —
+  ordering preserved.
   *Source:* `crates/motif-core/src/sync/worker.rs`; `MOTIF.md`
-  alpha.4 milestone.
+  decision 12.
+- `[gap]` **No replay-from-disk after worker crash.** v0.0.2-alpha.4
+  retries within a live worker thread but doesn't survive the worker
+  thread itself dying. If the host wires a fresh controller after a
+  crash, foreshadow=true mutations on disk aren't re-fed.
+  `Engine::replay_unconfirmed()` lands in v0.0.2-alpha.5 audit pass.
+  *Source:* `crates/motif-core/src/engine.rs`; `MOTIF.md` alpha.5
+  milestone.
+- `[gap]` **wasm worker doesn't actually sleep on backoff.**
+  `wasm_sleep` is a `future::ready` no-op for v0.0.2-alpha.4 — adding
+  proper backoff requires `gloo-timers` or `web-sys::setTimeout`,
+  both of which add wasm-bundle weight we'd rather defer until a
+  real bridge needs it. The native worker uses real
+  `std::thread::sleep` and respects the backoff config.
+  *Source:* `crates/motif-core/src/sync/worker.rs` (`wasm_sleep`).
+- `[gap]` **`EdgeConfig.foreshadow_eager = false` not yet enforced.**
+  v0.0.2-alpha.4 parses the field but always behaves as if `true`
+  (apply locally, mark foreshadow=true). Buffer-mode (wait for
+  controller confirm before applying locally) lands in alpha.5.
+  *Source:* `crates/motif-core/src/config.rs` (`EdgeConfig`).
+- `[gap]` **`EdgeConfig.retention_confirmed_secs` not yet enforced.**
+  Log compaction of confirmed mutations is alpha.5+ work; the field
+  is parsed and stored on the engine for forward-compatibility.
+  *Source:* `crates/motif-core/src/config.rs` (`EdgeConfig`).
+- `[gap]` **`EdgeConfig.schema_cache = "fetch"` not implemented.**
+  Only `"push"` (controller pushes; motif caches the latest) works.
+  Lazy-fetch is post-v0.0.2.
+  *Source:* `crates/motif-core/src/config.rs` (`EdgeConfig`).
+- `[scope]` **`hoverphone` test profile deferred to v0.0.3.**
+  v0.0.2-alpha.4 stood up the `default` and `potato` profiles
+  (the latter via a `ThrottledStorage` wrapper that sleeps before
+  every storage op). `hoverphone` (artificially over-fast / unusual
+  scheduling) needs a more invasive primitive than a sleep wrapper —
+  probably an interleaved-test runner — and lands in v0.0.3+.
+  *Source:* `crates/motif-core/tests/profiles.rs`; `MOTIF.md`
+  decision 22.
+- `[gap]` **`CapabilityConfig` auto-discovery deferred to v0.0.3+.**
+  v0.0.2-alpha.4 stores the host-provided capability profile and
+  forwards it to `Controller::connect`, but motif-core does not
+  itself probe RAM / cores / arch. Hosts populate manually for now.
+  *Source:* `crates/motif-core/src/config.rs` (`CapabilityConfig`);
+  `MOTIF.md` open question 1.
 - `[scope]` **`std::thread` is the default spawner; no host-provided
   alternative.** Native targets — including the future
   `aarch64-apple-ios` / `aarch64-linux-android` builds — use Rust's
