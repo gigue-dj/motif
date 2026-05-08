@@ -12,6 +12,7 @@
 //!
 //! See `MOTIF.md` at the repo root for the milestone plan.
 
+pub mod capability;
 pub mod config;
 pub mod engine;
 pub mod graph;
@@ -22,6 +23,7 @@ pub mod storage;
 pub mod sync;
 pub mod value;
 
+pub use capability::{probe as probe_capability, resolve as resolve_capability};
 pub use config::{
     CapabilityConfig, ConfigError, ControllerConfig, EdgeConfig, IdentityConfig, MotifConfig,
     StorageConfig,

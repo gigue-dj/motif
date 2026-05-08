@@ -127,9 +127,22 @@ pass can grep its way to the source.
 - `[scope]` **`[capability]` reports deterministic facts only.** No
   qualitative labels ("medium", "sufficient") — just numbers and well-
   defined enums. Motif reports facts; controller (or host) decides
-  what counts as enough. v0.0.2 lands the section; auto-discovery is
-  v0.0.3+.
+  what counts as enough.
   *Source:* `motif.toml.example`; `MOTIF.md` decision 20.
+- `[scope]` **`[capability]` probe is primary; TOML is per-field
+  override.** v0.0.3-alpha.1 made the probe authoritative — at open
+  time motif probes the resources it can verify access to (cores via
+  `std::thread::available_parallelism`, RAM via `sysinfo`, disk via
+  `Storage::free_space`, arch via `cfg!`) and merges with the host's
+  declaration: declared fields win, probe fills the rest. Reason: the
+  host's view of the device's resources isn't always motif's view —
+  cgroup quotas, sandboxes, or shared multi-tenant hosts can put the
+  two out of sync, and decisions made on inflated numbers fail
+  downstream. Per-field override lets the host lie when it knows
+  better (constraint testing, deliberate budgets) without forcing
+  full declaration.
+  *Source:* `crates/motif-core/src/capability.rs`; `MOTIF.md` v0.0.3
+  milestone.
 - `[scope]` **`[edge]` knobs are first-class for both strategies.**
   `edge-is-tiny` (cache + foreshadow) and `edge-is-free` (local
   execution) are both supported via configuration. Motif itself picks
@@ -378,14 +391,14 @@ pass can grep its way to the source.
   v0.0.2 exit criterion 11 carries forward into v0.0.3.
   *Source:* `crates/motif-core/tests/profiles.rs`; `MOTIF.md`
   decision 22.
-- `[gap]` **`CapabilityConfig` auto-discovery deferred to v0.0.3+.
-  *Knowingly accepted in v0.0.2-alpha.5.*** v0.0.2-alpha.4 stores the
-  host-provided capability profile and forwards it to
-  `Controller::connect`, but motif-core does not itself probe RAM /
-  cores / arch. Hosts populate manually for now; v0.0.3+ picks a
-  hardware-probe crate.
-  *Source:* `crates/motif-core/src/config.rs` (`CapabilityConfig`);
-  `MOTIF.md` open question 1.
+- ~~`[gap]` `CapabilityConfig` auto-discovery deferred to v0.0.3+~~
+  — **closed in v0.0.3-alpha.1.** Native probe via `sysinfo` (RAM)
+  + `std::thread::available_parallelism` (cores) + `fs2` via
+  `Storage::free_space` (disk) + `cfg!` (arch). Resolved at open
+  time; declared TOML fields override probe per-field. wasm32
+  probe defers to alpha.3 — alongside the storage shim, the
+  `navigator.*` probes land then. *Source:*
+  `crates/motif-core/src/capability.rs`.
 - `[scope]` **`std::thread` is the default spawner; no host-provided
   alternative.** Native targets — including the future
   `aarch64-apple-ios` / `aarch64-linux-android` builds — use Rust's
@@ -459,6 +472,15 @@ pass can grep its way to the source.
   file-backed + with-controller, 1k nodes, 1k lookups → p50 17.67 µs
   (well within the 50 ms exit criterion).
   *Source:* `crates/motif-cli/src/main.rs` (`run_bench`).
+- `[scope]` **Cold-start measurement is `motif bench --cold-start`.**
+  v0.0.3-alpha.1 added the harness. Per-iteration: fresh tempdir,
+  optional untimed seed, drop-and-reopen, time `Engine::open`. Reports
+  p50/p95/p99/mean + the resolved capability profile from the last
+  open. Smoke run (file backend, 1k seed, 30 iters): p50 = 1.26 ms.
+  No formal cold-start budget yet — set in v0.0.3-alpha.5 audit pass
+  once we have iOS / Android numbers to anchor against.
+  *Source:* `crates/motif-cli/src/main.rs` (`run_cold_start`);
+  `MOTIF.md` v0.0.3 milestone.
 
 ## Operations / observability
 
@@ -470,12 +492,15 @@ pass can grep its way to the source.
   system honest against both edge-is-tiny hardware and edge-is-free
   acceleration.
   *Source:* `MOTIF.md` decision 22; harness lands in v0.0.2-alpha.4.
-- `[scope]` **No metrics, no tracing.** No `tracing` crate, no
-  counters, no spans. Logs go to nowhere. `tracing` (with a no-op
-  default subscriber) lands in v0.0.3 — required for the cold-start
-  measurement harness and for downstream observability without
-  forcing a runtime choice on the host.
-  *Source:* `MOTIF.md` v0.0.3 milestone.
+- `[scope]` **`tracing` only (no `tracing-subscriber` in motif-core).**
+  v0.0.3-alpha.1 added the `tracing` crate with instrumentation on
+  `Engine::open_with`, the controller worker's connect / apply / retry
+  paths, and the resolved capability log. **No subscriber is
+  initialized in motif-core** — events are no-ops until the host
+  wires its own (`tracing-subscriber` on native, `tracing-wasm` on
+  wasm). Counters / metrics still aren't shipped.
+  *Source:* `crates/motif-core/src/engine.rs`,
+  `crates/motif-core/src/sync/worker.rs`; `MOTIF.md` v0.0.3 milestone.
 - `[scope]` **No connection pooling / multi-database.** One `Engine`
   per file, single writer, single reader (the engine takes
   `&mut self` for both). Multi-tenant evaluation lands in v0.0.6
