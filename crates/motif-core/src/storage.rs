@@ -57,12 +57,36 @@ pub enum StorageError {
     },
     #[error("truncate would corrupt the header: new_len {new_len} < HEADER_LEN {header_len}")]
     TruncateBelowHeader { new_len: u64, header_len: u64 },
+    /// v0.0.3-alpha.3: a wasm host-supplied storage shim threw an
+    /// exception. The message is best-effort — JsValue exceptions
+    /// don't always have a useful Display impl, so the implementation
+    /// falls back to "<no message>" if the host threw a non-string.
+    #[error("host storage error: {message}")]
+    JsHostError { message: String },
 }
+
+/// Marker trait that bounds [`Storage`] to `Send` on native targets and
+/// is a no-op on `wasm32-unknown-unknown`. Wasm has no threads in the
+/// base ABI, and JS-bridged types (anything holding a `JsValue`) are
+/// `!Send` by design — requiring `Send` on the trait would lock out
+/// the v0.0.3-alpha.3 [`crate::storage`]-shaped wasm host shim. Native
+/// hosts that put an `Engine` behind an `Arc<Mutex<…>>` and ship it
+/// across threads still need the `Send` bound, so we keep it where it
+/// matters and drop it where it doesn't.
+#[cfg(not(target_arch = "wasm32"))]
+pub trait MaybeSend: Send {}
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Send + ?Sized> MaybeSend for T {}
+
+#[cfg(target_arch = "wasm32")]
+pub trait MaybeSend {}
+#[cfg(target_arch = "wasm32")]
+impl<T: ?Sized> MaybeSend for T {}
 
 /// Append-only single-file storage. Writes go to the end; reads are by
 /// absolute byte offset (the `Engine` keeps an in-memory `id → offset`
 /// index).
-pub trait Storage: Send {
+pub trait Storage: MaybeSend {
     /// Append `bytes` and return the offset where they began. Implementations
     /// should ensure durability before returning (e.g. `fsync`).
     fn append(&mut self, bytes: &[u8]) -> Result<u64, StorageError>;

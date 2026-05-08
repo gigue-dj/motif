@@ -15,6 +15,12 @@ crate-type = ["cdylib", "rlib"]
 motif-core = { workspace = true }
 wasm-bindgen = { workspace = true }
 serde_json = { workspace = true }
+# v0.0.3-alpha.3: js-sys::Uint8Array for the host-supplied storage
+# shim's read_at return value. Already pulled in transitively by
+# wasm-bindgen-futures (via gloo-timers in motif-core wasm deps),
+# so the bundle hit is zero — declared explicitly so the import
+# isn't accidentally invisible-coupled to a transitive change.
+js-sys = { workspace = true }
 
 [lints]
 workspace = true
