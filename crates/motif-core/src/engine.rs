@@ -212,6 +212,32 @@ impl Engine {
         self
     }
 
+    /// Native-only: like [`Engine::with_controller`], but routes the
+    /// worker through a host-supplied [`crate::sync::Spawner`] instead
+    /// of the default [`crate::sync::StdThreadSpawner`]. Hosts on iOS
+    /// (post-alpha.4 cdylib) wire a GCD-backed spawner; hosts on
+    /// Android wire a coroutine-backed spawner. The wasm path still
+    /// uses `wasm_bindgen_futures::spawn_local` directly — there is no
+    /// equivalent `with_controller_spawned_by` on wasm because the
+    /// host's wasm runtime *is* the spawner.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_controller_spawned_by<C: crate::sync::Controller, S: crate::sync::Spawner>(
+        mut self,
+        controller: C,
+        spawner: S,
+    ) -> Self {
+        let log = Arc::new(MutationLog::new());
+        let _handle = crate::sync::spawn_controller_worker_with(
+            &log,
+            controller,
+            self.capability.clone(),
+            self.edge_config.clone(),
+            spawner,
+        );
+        self.mutation_log = Some(log);
+        self
+    }
+
     /// Like [`Engine::with_controller`], but also asserts that the
     /// host's declared controller name matches the `kind` field from
     /// `motif.toml`'s `[controller]` section. Catches silent typos —

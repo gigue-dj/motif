@@ -23,6 +23,10 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 futures-channel = { version = "0.3", default-features = false, features = ["std", "alloc"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# v0.0.3-alpha.2: real wasm sleep via setTimeout. `futures` feature
+# pulls in gloo_timers::future::TimeoutFuture; default features bring
+# in everything else gloo wants and bloats the bundle.
+gloo-timers = { version = "0.3", default-features = false, features = ["futures"] }
 bincode = { version = "2", features = ["serde"] }
 tempfile = "3"
 # v0.0.3-alpha.1: tracing for observability (no-op when no subscriber

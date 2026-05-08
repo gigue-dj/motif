@@ -37,11 +37,14 @@ fs2 = { workspace = true }
 # Worker-thread-per-controller scaffolding (v0.0.2-alpha.2). Native uses
 # std::thread + std::sync::mpsc directly (no extra deps); wasm uses
 # wasm-bindgen-futures::spawn_local + futures-channel for the async edge.
+# v0.0.3-alpha.2 adds gloo-timers for real setTimeout-backed sleep on
+# wasm (replaces the alpha-4 future::ready no-op).
 # The wasm deps are target-gated so native builds stay slim.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = { workspace = true }
 futures-channel = { workspace = true }
 futures-util = { workspace = true }
+gloo-timers = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

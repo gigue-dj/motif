@@ -10,6 +10,8 @@
 mod controller;
 mod mutation;
 mod mutation_log;
+#[cfg(not(target_arch = "wasm32"))]
+mod spawner;
 mod worker;
 
 pub use controller::{Controller, ControllerError};
@@ -17,4 +19,8 @@ pub use controller::{Controller, ControllerError};
 pub use controller::{InMemoryController, InMemoryHandle};
 pub use mutation::{ActorId, Mutation, MutationOp};
 pub use mutation_log::MutationLog;
+#[cfg(not(target_arch = "wasm32"))]
+pub use spawner::{Spawner, StdThreadSpawner};
+#[cfg(not(target_arch = "wasm32"))]
+pub use worker::spawn_controller_worker_with;
 pub use worker::{spawn_controller_worker, WorkerHandle};
