@@ -97,12 +97,17 @@ pass can grep its way to the source.
   `wasmtime` or similar and pay the runtime tax.
   *Source:* `MOTIF.md` decision 2; `rust-toolchain.toml`.
 - `[scope]` **WASM runtime perf tax** — host-runtime execution costs
-  ~2–5× vs. native Rust. Acceptable for v0.0.1; native targets are a
-  v0.0.2+ option.
-  *Source:* `MOTIF.md` decision 2.
-- `[scope]` **Internally usable only** — all crates are
-  `publish = false`. No crates.io, no semver guarantees.
-  *Source:* `Cargo.toml`; `MOTIF.md` decision 14.
+  ~2–5× vs. native Rust. Acceptable through v0.0.2; native `cdylib`
+  evaluation (`aarch64-apple-ios` + `aarch64-linux-android` via
+  `uniffi` or direct cdylib) lands in v0.0.3 ("Run on a real device").
+  *Source:* `MOTIF.md` decision 2; v0.0.3 milestone.
+- `[scope]` **Internally usable only through v0.0.3** — all crates
+  are `publish = false`. No crates.io, no semver guarantees.
+  **First crates.io publish is v0.0.4** with a pre-v0.1 "fluid API;
+  expect breakage" README note. v0.1.0 freezes the public surface
+  and adds semver promises.
+  *Source:* `Cargo.toml`; `MOTIF.md` decision 14; v0.0.4 + v0.1.0
+  milestones.
 - `[scope]` **Dual MIT / Apache-2.0** — Rust convention; not yet
   uniform with `cpp-reference/` (which remains MIT only via the
   inherited Kuzu license).
@@ -159,10 +164,12 @@ pass can grep its way to the source.
   `MOTIF.md` decision 10.
 - `[debt]` **No CRC on records.** Length-prefixed `bincode` only. Torn
   writes surface as decode errors during recovery; in-place corruption
-  in the middle of the log is detected only when read. CRC + crash-
-  safety semantics land alongside the persistent `MutationLog` in
-  v0.0.2.
-  *Source:* `crates/motif-core/src/record.rs:1-15`.
+  in the middle of the log is detected only when read. CRC + improved
+  crash-safety semantics land in v0.0.5 ("Hostile-device-aware")
+  alongside encryption-at-rest — both are durability concerns and
+  share the storage-layer touch.
+  *Source:* `crates/motif-core/src/record.rs:1-15`;
+  `MOTIF.md` v0.0.5 milestone.
 - `[debt]` **Recovery silently truncates a torn tail.** No diagnostic
   is surfaced beyond log replay continuing past the truncation. Should
   emit a `tracing` event when `tracing` is added in v0.0.2.
@@ -177,23 +184,35 @@ pass can grep its way to the source.
   *Source:* `crates/motif-core/src/storage.rs:52-71`;
   `MOTIF.md` decision 12.
 - `[gap]` **`FileStorage` fails at open on `wasm32`.** No filesystem
-  on the target. v0.0.1 will use `MemoryStorage` for the wasm path; a
-  host-provided storage shim (alpha.5+) is the longer-term answer.
-  *Source:* `crates/motif-core/src/storage.rs:5-8`.
+  on the target. `MemoryStorage` covers the wasm path through v0.0.2;
+  a host-provided storage shim (OPFS / app sandbox / wasm-bindgen-
+  driven I/O) is the v0.0.3 "Run on a real device" North Star.
+  *Source:* `crates/motif-core/src/storage.rs:5-8`;
+  `MOTIF.md` v0.0.3 milestone.
 - `[scope]` **Single-namespace ID index.** Nodes and edges share
-  `HashMap<String, IndexEntry>`. Globally unique ids; trivially split
-  in v0.0.2 if it bites.
-  *Source:* `crates/motif-core/src/engine.rs:55-61`.
+  `HashMap<String, IndexEntry>`. Globally unique ids today.
+  Namespace split (separate node and edge maps) graduates to v0.0.4
+  alongside the edge-index work — gigue's B2B target (1M+ edges)
+  makes the shared map a real cost, not a "trivial split if it
+  bites".
+  *Source:* `crates/motif-core/src/engine.rs:55-61`;
+  `MOTIF.md` v0.0.4 milestone.
 - `[debt]` **No referential integrity on node delete.** Deleting a
   node that has incoming/outgoing edges leaves them dangling; the
-  query layer treats them as unreachable. Cascade (`DETACH DELETE`)
-  arrives with the controller-side conflict resolution in v0.0.2.
-  *Source:* `crates/motif-core/src/engine.rs:200-211`.
+  query layer treats them as unreachable. `DETACH DELETE` /
+  cascade lands in v0.0.4 alongside the rest of the Cypher surface
+  growth.
+  *Source:* `crates/motif-core/src/engine.rs:200-211`;
+  `MOTIF.md` v0.0.4 milestone.
 - `[perf]` **`iter_nodes` / `iter_edges` are O(N) reads.** The id
-  index is the only secondary index in v0.0.1; any MATCH without an
-  `id()` predicate scans every record. Acceptable up to ~1k nodes; a
-  label / property index is alpha.5+ work.
-  *Source:* `crates/motif-core/src/engine.rs:225-264`.
+  index is the only secondary index in v0.0.2; any MATCH without an
+  `id()` predicate scans every record. Acceptable through v0.0.3
+  ("real device" North Star doesn't grow the graph); **graduates to
+  v0.0.4 North-Star tier** because the gigue B2B target (100k–1M+
+  edges) makes O(N) edge scans non-negotiable. Edge label + property
+  indexes ship with the Cypher surface growth.
+  *Source:* `crates/motif-core/src/engine.rs:225-264`;
+  `MOTIF.md` v0.0.4 milestone.
 - `[debt]` **Property values are limited to 5 scalar variants.**
   `Null`, `Bool`, `I64`, `F64`, `String`. No timestamps, no blobs, no
   lists, no nested structs. Expanded when the query layer needs more.
@@ -226,10 +245,13 @@ pass can grep its way to the source.
   `OPTIONAL MATCH`.
   *Source:* `crates/motif-core/src/query/mod.rs:30-44`,
   `crates/motif-core/src/query/ast.rs:5-7`.
-- `[gap]` **Edges aren't queryable.** Engine API exposes `insert_edge`
-  / `get_edge` / `iter_edges`, but Cypher queries can only target
-  nodes in v0.0.1. Edge query support is alpha.5+.
-  *Source:* `crates/motif-core/src/query/mod.rs:33-35`.
+- `[gap]` **Edges aren't queryable from Cypher.** Engine API exposes
+  `insert_edge` / `get_edge` / `iter_edges`, but Cypher queries can
+  only target nodes through v0.0.2. Edge queries (`MATCH (a)-[r]->(b)`)
+  + multi-pattern `MATCH` ship in v0.0.4 ("Real Cypher queries at
+  scale") alongside the edge-index work.
+  *Source:* `crates/motif-core/src/query/mod.rs:33-35`;
+  `MOTIF.md` v0.0.4 milestone.
 - `[scope]` **`MERGE` is no-op-on-hit, not full upsert.** Existing
   nodes are not updated; only missing nodes are inserted. Real upsert
   is post-v0.0.1 once the controller decides what "update" means.
@@ -414,8 +436,10 @@ pass can grep its way to the source.
   *Source:* `crates/motif-wasm/src/lib.rs:1-15`.
 - `[scope]` **Wasm params + result marshalled as JSON strings.** No
   `serde-wasm-bindgen` dependency; host wraps in `JSON.stringify` /
-  `JSON.parse`. Acceptable for v0.0.1 (one allocation per call); a
-  binary marshalling path is v0.0.2 if profiling shows it matters.
+  `JSON.parse`. Acceptable through v0.0.2 (one allocation per call);
+  binary marshalling lands in v0.0.3 ("Run on a real device") if the
+  cold-start measurement harness shows it matters — otherwise pushed
+  later.
   *Source:* `crates/motif-wasm/src/lib.rs` (`query`, `parse_params`).
 - `[debt]` **Wasm `params_json` rejects nested objects / arrays.**
   Only scalar params (`null`, `bool`, integers, floats, strings).
@@ -447,32 +471,53 @@ pass can grep its way to the source.
   acceleration.
   *Source:* `MOTIF.md` decision 22; harness lands in v0.0.2-alpha.4.
 - `[scope]` **No metrics, no tracing.** No `tracing` crate, no
-  counters, no spans. Logs go to nowhere. Adding `tracing` (with a
-  no-op default subscriber) is a v0.0.2 chore — keeps `motif-core`
-  observable without forcing a runtime choice on the host.
+  counters, no spans. Logs go to nowhere. `tracing` (with a no-op
+  default subscriber) lands in v0.0.3 — required for the cold-start
+  measurement harness and for downstream observability without
+  forcing a runtime choice on the host.
+  *Source:* `MOTIF.md` v0.0.3 milestone.
 - `[scope]` **No connection pooling / multi-database.** One `Engine`
   per file, single writer, single reader (the engine takes
-  `&mut self` for both). Multi-tenant is v0.0.2+.
-  *Source:* `crates/motif-core/src/engine.rs:1-15`.
+  `&mut self` for both). Multi-tenant evaluation lands in v0.0.6
+  ("Scale and operate"); the architectural answer may be a host-side
+  multiplexer rather than growing `Engine` itself.
+  *Source:* `crates/motif-core/src/engine.rs:1-15`;
+  `MOTIF.md` v0.0.6 milestone.
 - `[scope]` **No backup / restore / migration.** The 4-byte
   format-version field lives in the file header but the engine
-  rejects any version other than `1`. No migration script yet.
-  *Source:* `crates/motif-core/src/storage.rs:21-23,156-163`.
+  rejects any version other than the current one. Migration design
+  lands in v0.0.6 alongside the rest of the operability work.
+  *Source:* `crates/motif-core/src/storage.rs:21-23,156-163`;
+  `MOTIF.md` v0.0.6 milestone.
 
 ## Security
 
-- `[scope]` **No encryption-at-rest.** Records are plaintext
-  `bincode`. Storage layer must not bake in plaintext-only
-  assumptions; revisit when the per-device-key flow lands.
-  *Source:* `MOTIF.md` decision 13.
+- `[scope]` **No encryption-at-rest through v0.0.4.** Records are
+  plaintext `bincode`. Storage layer doesn't bake in plaintext-only
+  assumptions. Encryption-at-rest design + impl lands in v0.0.5
+  ("Hostile-device-aware") alongside CRC and the controller crypto
+  handshake.
+  *Source:* `MOTIF.md` decision 13; v0.0.5 milestone.
 - `[scope]` **Motif compares opaque tokens, doesn't validate them.**
   Per MOTIF.md decision 4 (refined for v0.0.2), Motif takes opaque
   tokens from the host and opaque keys from the controller and checks
   they match — no JWT validation chain inside motif-core. Real auth
   flow ownership is host (token issuance) + controller (key issuance);
-  motif is the comparison point.
+  motif is the comparison point. v0.0.5 documents and tests both
+  flows end-to-end with a spec controller.
   *Source:* `crates/motif-core/src/sync/mutation.rs:7-15`;
-  `MOTIF.md` decision 4.
+  `MOTIF.md` decision 4; v0.0.5 milestone.
+- `[gap]` **No controller crypto-suite handshake.** Bridges currently
+  deliver `Mutation`s with no declaration of how they were
+  transmitted. Motif imposes nothing through v0.0.4. v0.0.5 adds a
+  `[security]` TOML section (`require_authenticated_channel`,
+  `min_aead`, `pq_required`, suite allow-list); bridges advertise
+  their suite at `Controller::connect`; motif validates declared-vs-
+  policy and surfaces `ControllerSecurityError` on mismatch. PQ-
+  forward (Signal-PQXDH-style fail-visible scanner) is plumbing in
+  v0.0.5; PQ implementation itself is stretch. Opt-out is named
+  `Engine::dangerously_*` — no quiet escape hatches.
+  *Source:* `MOTIF.md` v0.0.5 milestone.
 - `[scope]` **`unsafe_code = "forbid"`** at the workspace level. This
   is a *feature*, not a limitation; noted here so the audit pass can
   confirm the lint is still in place.
