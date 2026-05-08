@@ -37,6 +37,8 @@ pub use sync::{
     spawn_controller_worker, ActorId, Controller, ControllerError, Mutation, MutationLog,
     MutationOp, WorkerHandle,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use sync::{spawn_controller_worker_with, Spawner, StdThreadSpawner};
 #[cfg(feature = "in-memory-controller")]
 pub use sync::{InMemoryController, InMemoryHandle};
 pub use value::Value;

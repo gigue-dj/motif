@@ -356,13 +356,11 @@ pass can grep its way to the source.
   no-controller no-op. *Source:*
   `crates/motif-core/src/engine.rs` (`replay_unconfirmed`);
   `crates/motif-core/tests/audit_pass.rs`.
-- `[gap]` **wasm worker doesn't actually sleep on backoff.
-  *Knowingly accepted in v0.0.2-alpha.5.*** `wasm_sleep` is a
-  `future::ready` no-op — proper backoff requires `gloo-timers` or
-  `web-sys::setTimeout`, both of which add wasm-bundle weight we'd
-  rather defer until a real bridge needs it. The native worker uses
-  real `std::thread::sleep` and respects the backoff config; the
-  controller flow is correct on native, just busy on wasm.
+- ~~`[gap]` wasm worker doesn't actually sleep on backoff~~
+  — **closed in v0.0.3-alpha.2.** `wasm_sleep` now awaits
+  `gloo_timers::future::TimeoutFuture::new(ms)` (a `setTimeout`-
+  backed Future) instead of `future::ready`. Wasm retry backoff is
+  real now; bundle hit was modest (well within the 2 MiB budget).
   *Source:* `crates/motif-core/src/sync/worker.rs` (`wasm_sleep`).
 - `[gap]` **`EdgeConfig.foreshadow_eager = false` not yet enforced.
   *Knowingly accepted in v0.0.2-alpha.5.*** Parses the field but always
@@ -399,19 +397,18 @@ pass can grep its way to the source.
   probe defers to alpha.3 — alongside the storage shim, the
   `navigator.*` probes land then. *Source:*
   `crates/motif-core/src/capability.rs`.
-- `[scope]` **`std::thread` is the default spawner; no host-provided
-  alternative.** Native targets — including the future
-  `aarch64-apple-ios` / `aarch64-linux-android` builds — use Rust's
-  stdlib `std::thread::spawn` with `std::sync::mpsc::channel`. This
-  works correctly on both iOS and Android (pthreads under the hood)
-  but is not the preferred concurrency primitive on either (iOS GCD,
-  Android coroutines). v0.0.3+ should add a `Spawner` trait so hosts
-  can opt into their platform's preferred runtime; the default
-  std::thread impl stays for simplicity and portability. **Do not
-  introduce target-specific runtime assumptions in motif-core** —
-  contributors adding a tokio reactor or similar would break this
-  composability.
-  *Source:* `crates/motif-core/src/sync/worker.rs`; `MOTIF.md`
+- `[scope]` **`Spawner` trait is native-only; wasm has no equivalent
+  seam.** v0.0.3-alpha.2 added [`crate::sync::Spawner`] +
+  [`crate::sync::StdThreadSpawner`] (default) +
+  `Engine::with_controller_spawned_by(controller, spawner)` for hosts
+  that want to route the controller worker through GCD (iOS) or
+  coroutines (Android). Wasm builds skip the trait entirely — the
+  host's wasm runtime *is* the spawner, and overriding `spawn_local`
+  would mean swapping the microtask queue for something else, which
+  isn't a real use case. **Do not introduce target-specific runtime
+  assumptions in motif-core** — contributors adding a tokio reactor
+  or similar would break this composability.
+  *Source:* `crates/motif-core/src/sync/spawner.rs`; `MOTIF.md`
   decision 12.
 - `[scope]` **`InMemoryController` is feature-flagged (default-on).**
   Gated behind the `in-memory-controller` Cargo feature. Production
