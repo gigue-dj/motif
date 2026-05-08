@@ -102,12 +102,14 @@ pub struct Engine {
     /// accepted); when `Some`, mutations against unknown labels surface
     /// [`EngineError::SchemaUnknown`].
     current_schema: Option<Schema>,
-    /// Per-instance capability profile copied from
-    /// `MotifConfig::capability`. Forwarded to the controller worker
-    /// at `Engine::with_controller` time so bridges can route based
-    /// on host facts (RAM, cores, etc.). v0.0.2-alpha.4 stores it;
-    /// v0.0.3+ may also expose it via the `_motif.capability.X`
-    /// metadata namespace once auto-discovery lands.
+    /// Per-instance resolved capability profile. v0.0.3-alpha.1 made
+    /// the probe primary: at open time motif probes deterministic
+    /// facts via [`crate::capability::probe`] (cores, RAM, disk,
+    /// arch) and merges them with the host's
+    /// `MotifConfig::capability` declaration — declared fields win,
+    /// probe fills the rest. The resolved value is what
+    /// [`Engine::capability`] returns and what the controller worker
+    /// receives at `connect`.
     capability: CapabilityConfig,
     /// Per-instance edge-strategy config copied from `MotifConfig::edge`.
     /// Drives the controller worker's retry/backoff in alpha.4; other
@@ -140,7 +142,26 @@ impl Engine {
     }
 
     /// Open with a caller-provided backend.
+    #[tracing::instrument(level = "info", skip(config, storage), fields(
+        actor = %config.identity.user_id,
+        device = %config.identity.device_id,
+        storage_path = ?config.storage.path,
+    ))]
     pub fn open_with(config: &MotifConfig, storage: Box<dyn Storage>) -> Result<Self, EngineError> {
+        // v0.0.3-alpha.1: probe the host's deterministic capability
+        // facts and merge with the host's declaration from
+        // `motif.toml`. Per-field override: declared wins where
+        // present; probe fills the rest.
+        let probed = crate::capability::probe(storage.as_ref());
+        let capability = crate::capability::resolve(&config.capability, probed);
+        tracing::debug!(
+            ram_mb = ?capability.ram_mb,
+            cpu_cores = ?capability.cpu_cores,
+            storage_mb = ?capability.storage_mb,
+            arch = ?capability.arch,
+            "capability resolved",
+        );
+
         let mut engine = Self {
             storage,
             index: HashMap::new(),
@@ -151,7 +172,7 @@ impl Engine {
             next_local_seq: 1,
             mutation_log: None,
             current_schema: None,
-            capability: config.capability.clone(),
+            capability,
             edge_config: config.edge.clone(),
             declared_controller_kind: config.controller.kind.clone(),
         };
@@ -215,7 +236,9 @@ impl Engine {
         Ok(self.with_controller(controller))
     }
 
-    /// Read-only access to the host's reported capability profile.
+    /// Read-only access to the resolved capability profile (host
+    /// declaration in `motif.toml`'s `[capability]` overlaid on the
+    /// probe — see [`crate::capability::probe`] / [`crate::capability::resolve`]).
     /// `None` of the inner `Option<>` fields just means the host
     /// didn't declare that fact in the TOML; auto-discovery is v0.0.3+.
     pub fn capability(&self) -> &CapabilityConfig {

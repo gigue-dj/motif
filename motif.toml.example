@@ -36,13 +36,23 @@ path = "./motif.db"
 # given workload. NO qualitative labels here ("medium", "sufficient", ...) —
 # just numbers and well-defined enums.
 #
-# Auto-discovery is v0.0.3+; for now hosts populate these manually at
-# install time. Add fields as bridges grow capability-aware routing.
-ram_mb = 4096
-cpu_cores = 4
-storage_mb = 65536
-arch = "aarch64"     # one of: "aarch64", "x86_64", "wasm32"
-gpu_present = false
+# v0.0.3-alpha.1: motif probes its own resource access at open time
+# (cores via std::thread::available_parallelism, RAM via sysinfo,
+# storage via Storage::free_space, arch via cfg!). Every field below is
+# optional and acts as a per-field OVERRIDE — present here wins over
+# the probe. Reasons to override: the host knows motif is constrained
+# below the kernel-visible numbers (cgroup quota, sandbox), or the
+# host wants to lie for testing. Otherwise leave fields absent and
+# motif fills them.
+#
+# wasm32: native probes don't run; alpha.3 wires navigator.* probes
+# alongside the storage shim. Until then, hosts on wasm32 must declare
+# fields they care about.
+# ram_mb = 4096
+# cpu_cores = 4
+# storage_mb = 65536
+# arch = "aarch64"     # one of: "aarch64", "x86_64", "wasm32"
+# gpu_present = false
 
 [edge]
 # Edge strategy knobs. Motif itself does not pick a strategy — these

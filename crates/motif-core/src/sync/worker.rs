@@ -62,20 +62,23 @@ fn spawn_impl<C: Controller>(
 
     let mut controller = controller;
     thread::spawn(move || {
+        let _span = tracing::info_span!("controller_worker").entered();
         // Best-effort connect. A Transient/Permanent here means we
         // skip the apply loop and go straight to flush — a real bridge
         // can decide whether retries-of-connect are worth doing in
         // alpha.5+. For v0.0.2-alpha.4 we keep it simple: connect
         // failure → no apply, just flush.
         if let Err(e) = controller.connect(&capability) {
-            eprintln!("motif: controller.connect failed: {e}");
+            tracing::warn!(error = %e, "controller.connect failed; skipping apply loop");
             controller.flush();
             return;
         }
+        tracing::debug!("controller connected; entering apply loop");
 
         while let Ok(m) = rx.recv() {
             retry_apply_native(&mut controller, &m, &edge_config);
         }
+        tracing::debug!("controller worker draining; calling flush()");
         controller.flush();
     });
 
@@ -93,23 +96,32 @@ fn retry_apply_native<C: Controller>(controller: &mut C, m: &Mutation, edge: &Ed
         match controller.apply(m) {
             Ok(()) => return,
             Err(ControllerError::Permanent { reason }) => {
-                eprintln!(
-                    "motif: dropping mutation seq={} (permanent): {reason}",
-                    m.local_seq
+                tracing::warn!(
+                    seq = m.local_seq,
+                    reason = %reason,
+                    "dropping mutation (permanent error)"
                 );
                 return;
             }
-            Err(ControllerError::Transient { reason: _ }) => {
+            Err(ControllerError::Transient { reason }) => {
                 attempt = attempt.saturating_add(1);
                 if edge.controller_retry_max_attempts > 0
                     && attempt >= edge.controller_retry_max_attempts
                 {
-                    eprintln!(
-                        "motif: dropping mutation seq={} after {attempt} retries",
-                        m.local_seq
+                    tracing::warn!(
+                        seq = m.local_seq,
+                        attempts = attempt,
+                        "dropping mutation after retry budget exhausted"
                     );
                     return;
                 }
+                tracing::debug!(
+                    seq = m.local_seq,
+                    attempt,
+                    backoff_ms,
+                    reason = %reason,
+                    "transient apply error; sleeping before retry"
+                );
                 std::thread::sleep(Duration::from_millis(backoff_ms));
                 backoff_ms =
                     (backoff_ms.saturating_mul(2)).min(edge.controller_retry_max_backoff_ms);
@@ -136,14 +148,17 @@ fn spawn_impl<C: Controller>(
 
     let mut controller = controller;
     wasm_bindgen_futures::spawn_local(async move {
-        if let Err(_) = controller.connect(&capability) {
+        if let Err(e) = controller.connect(&capability) {
+            tracing::warn!(error = %e, "controller.connect failed; skipping apply loop");
             controller.flush();
             return;
         }
+        tracing::debug!("controller connected; entering apply loop");
 
         while let Some(m) = rx.next().await {
             retry_apply_wasm(&mut controller, &m, &edge_config).await;
         }
+        tracing::debug!("controller worker draining; calling flush()");
         controller.flush();
     });
 
@@ -158,14 +173,33 @@ async fn retry_apply_wasm<C: Controller>(controller: &mut C, m: &Mutation, edge:
     loop {
         match controller.apply(m) {
             Ok(()) => return,
-            Err(ControllerError::Permanent { .. }) => return,
-            Err(ControllerError::Transient { .. }) => {
+            Err(ControllerError::Permanent { reason }) => {
+                tracing::warn!(
+                    seq = m.local_seq,
+                    reason = %reason,
+                    "dropping mutation (permanent error)"
+                );
+                return;
+            }
+            Err(ControllerError::Transient { reason }) => {
                 attempt = attempt.saturating_add(1);
                 if edge.controller_retry_max_attempts > 0
                     && attempt >= edge.controller_retry_max_attempts
                 {
+                    tracing::warn!(
+                        seq = m.local_seq,
+                        attempts = attempt,
+                        "dropping mutation after retry budget exhausted"
+                    );
                     return;
                 }
+                tracing::debug!(
+                    seq = m.local_seq,
+                    attempt,
+                    backoff_ms,
+                    reason = %reason,
+                    "transient apply error; awaiting wasm_sleep before retry"
+                );
                 wasm_sleep(backoff_ms).await;
                 backoff_ms =
                     (backoff_ms.saturating_mul(2)).min(edge.controller_retry_max_backoff_ms);

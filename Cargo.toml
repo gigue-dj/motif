@@ -25,6 +25,13 @@ futures-channel = { version = "0.3", default-features = false, features = ["std"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 bincode = { version = "2", features = ["serde"] }
 tempfile = "3"
+# v0.0.3-alpha.1: tracing for observability (no-op when no subscriber
+# is wired). Required for the cold-start measurement North Star.
+tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
+# v0.0.3-alpha.1: native-only capability probing. Both crates are
+# target-gated in motif-core so wasm32 builds don't pull them.
+sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+fs2 = "0.4"
 motif-core = { path = "crates/motif-core", version = "0.0.2" }
 
 [workspace.lints.rust]

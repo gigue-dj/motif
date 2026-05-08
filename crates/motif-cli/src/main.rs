@@ -7,14 +7,20 @@
 //!               [--with-controller]
 //!     id-lookup latency harness; v0.0.2-alpha.5 added file-backed and
 //!     with-controller modes per MOTIF.md alpha.5 bench-extension item.
+//!   motif bench --cold-start [--seed N] [--iterations N]
+//!               [--backend memory|file]
+//!     v0.0.3-alpha.1: Engine::open timing harness. Per-iteration:
+//!     create a fresh store, optionally seed it untimed, drop the
+//!     engine, then time the reopen. Reports p50/p95/p99/mean +
+//!     the resolved capability profile from one of the opens.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
 use motif_core::{
-    ControllerConfig, Engine, IdentityConfig, InMemoryController, MotifConfig, Node, Params,
-    StorageConfig, Value,
+    CapabilityConfig, ControllerConfig, Engine, IdentityConfig, InMemoryController, MotifConfig,
+    Node, Params, StorageConfig, Value,
 };
 use tempfile::TempDir;
 
@@ -23,7 +29,9 @@ usage:
   motif version
   motif print-config <path-to-motif.toml>
   motif bench [--nodes N] [--lookups M] [--backend memory|file]
-              [--with-controller]";
+              [--with-controller]
+  motif bench --cold-start [--seed N] [--iterations N]
+              [--backend memory|file]";
 
 #[derive(Debug, Clone, Copy)]
 enum Backend {
@@ -67,6 +75,9 @@ fn main() -> ExitCode {
             let mut lookups = 1_000usize;
             let mut backend = Backend::Memory;
             let mut with_controller = false;
+            let mut cold_start = false;
+            let mut seed = 0usize;
+            let mut iterations = 50usize;
             while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "--nodes" => nodes = parse_usize(&mut args, "--nodes"),
@@ -83,6 +94,9 @@ fn main() -> ExitCode {
                         };
                     }
                     "--with-controller" => with_controller = true,
+                    "--cold-start" => cold_start = true,
+                    "--seed" => seed = parse_usize(&mut args, "--seed"),
+                    "--iterations" => iterations = parse_usize(&mut args, "--iterations"),
                     other => {
                         eprintln!("unknown bench flag: {other}");
                         eprintln!("{USAGE}");
@@ -90,7 +104,11 @@ fn main() -> ExitCode {
                     }
                 }
             }
-            run_bench(nodes, lookups, backend, with_controller)
+            if cold_start {
+                run_cold_start(seed, iterations, backend)
+            } else {
+                run_bench(nodes, lookups, backend, with_controller)
+            }
         }
         other => {
             eprintln!("unknown command: {other}");
@@ -212,4 +230,100 @@ fn run_bench(nodes: usize, lookups: usize, backend: Backend, with_controller: bo
         println!("PASS: p50 well within budget.");
         ExitCode::SUCCESS
     }
+}
+
+/// v0.0.3-alpha.1 cold-start measurement.
+///
+/// Per iteration:
+///  1. Create a fresh store (per-iteration tempdir for the file backend;
+///     fresh `MemoryStorage::new()` for memory).
+///  2. (File backend only) seed `seed` nodes via a temporary engine that
+///     is dropped before timing — this leaves a recovery-shaped log on
+///     disk for the timed reopen.
+///  3. Time `Engine::open` (file) or `Engine::open_in_memory` (memory).
+///
+/// Reports p50/p95/p99/mean of the open() duration, plus the resolved
+/// capability profile from the last open. Memory backend cold-start
+/// only measures the empty-store floor — no recovery work happens
+/// because each iteration starts fresh.
+fn run_cold_start(seed: usize, iterations: usize, backend: Backend) -> ExitCode {
+    if iterations == 0 {
+        eprintln!("--iterations must be > 0");
+        return ExitCode::from(2);
+    }
+    if matches!(backend, Backend::Memory) && seed > 0 {
+        eprintln!(
+            "warning: --seed is ignored for --backend memory \
+             (no persistence; each iteration opens an empty store)"
+        );
+    }
+
+    let mut samples: Vec<f64> = Vec::with_capacity(iterations);
+    let mut last_capability: Option<CapabilityConfig> = None;
+
+    for _ in 0..iterations {
+        let _tmp = match backend {
+            Backend::Memory => None,
+            Backend::File => Some(TempDir::new().expect("tempdir")),
+        };
+        let path = match backend {
+            Backend::Memory => PathBuf::from(":memory:"),
+            Backend::File => _tmp.as_ref().unwrap().path().join("cold.db"),
+        };
+        let cfg = bench_config(path);
+
+        if matches!(backend, Backend::File) && seed > 0 {
+            let mut engine = Engine::open(&cfg).expect("open for seed");
+            for i in 0..seed {
+                engine
+                    .insert_node(Node::new(format!("n{i}"), "Person"))
+                    .expect("insert");
+            }
+            drop(engine);
+        }
+
+        let t = Instant::now();
+        let engine = match backend {
+            Backend::Memory => Engine::open_in_memory(&cfg).expect("open in-memory"),
+            Backend::File => Engine::open(&cfg).expect("open file-backed"),
+        };
+        let elapsed_ms = t.elapsed().as_secs_f64() * 1000.0;
+        last_capability = Some(engine.capability().clone());
+        drop(engine);
+        samples.push(elapsed_ms);
+    }
+
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let p = |q: f64| -> f64 {
+        let idx = ((samples.len() - 1) as f64 * q).round() as usize;
+        samples[idx]
+    };
+    let p50 = p(0.50);
+    let p95 = p(0.95);
+    let p99 = p(0.99);
+    let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+
+    let backend_label = match backend {
+        Backend::Memory => "in-memory (empty-store floor)",
+        Backend::File => "file-backed (seeded then reopened)",
+    };
+
+    println!("motif bench --cold-start (native target)");
+    println!("  backend ............. {backend_label}");
+    println!("  seed records ........ {seed}");
+    println!("  iterations .......... {iterations}");
+    println!("  open p50 ............ {p50:.3} ms");
+    println!("  open p95 ............ {p95:.3} ms");
+    println!("  open p99 ............ {p99:.3} ms");
+    println!("  open mean ........... {mean:.3} ms");
+    if let Some(cap) = last_capability {
+        println!();
+        println!("resolved capability (declared overrides probe):");
+        println!("  ram_mb .............. {:?}", cap.ram_mb);
+        println!("  cpu_cores ........... {:?}", cap.cpu_cores);
+        println!("  storage_mb .......... {:?}", cap.storage_mb);
+        println!("  arch ................ {:?}", cap.arch);
+        println!("  gpu_present ......... {:?}", cap.gpu_present);
+    }
+    ExitCode::SUCCESS
 }

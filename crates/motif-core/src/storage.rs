@@ -88,6 +88,17 @@ pub trait Storage: Send {
     /// safe value, but the guard keeps future misuse from corrupting
     /// the header).
     fn truncate(&mut self, new_len: u64) -> Result<(), StorageError>;
+
+    /// Bytes available on the underlying medium, if the implementation
+    /// can answer. Used by the v0.0.3 capability probe to populate
+    /// `[capability].storage_mb` when the host hasn't declared one.
+    ///
+    /// `FileStorage` returns `Some(fs2::available_space(path))`.
+    /// `MemoryStorage` returns `None` (no underlying medium). The
+    /// wasm host-storage shim (alpha.3) defers to the host JS object.
+    fn free_space(&self) -> Option<u64> {
+        None
+    }
 }
 
 // ---------- FileStorage ----------
@@ -245,6 +256,21 @@ impl Storage for FileStorage {
         })?;
         self.len = new_len;
         Ok(())
+    }
+
+    fn free_space(&self) -> Option<u64> {
+        // fs2 is target-gated to non-wasm32 in Cargo.toml, but
+        // FileStorage itself is buildable on wasm32 (and unusable —
+        // open() fails at OpenOptions::open). Keep the module
+        // compilable on wasm32 by returning None there.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            fs2::available_space(&self.path).ok()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            None
+        }
     }
 }
 
