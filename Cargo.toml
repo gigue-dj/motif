@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 rust-version = "1.78"
 license = "MIT OR Apache-2.0"
@@ -25,7 +25,7 @@ futures-channel = { version = "0.3", default-features = false, features = ["std"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 bincode = { version = "2", features = ["serde"] }
 tempfile = "3"
-motif-core = { path = "crates/motif-core", version = "0.0.1" }
+motif-core = { path = "crates/motif-core", version = "0.0.2" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
