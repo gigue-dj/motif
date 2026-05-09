@@ -196,12 +196,16 @@ pass can grep its way to the source.
   per the "sync core" decision. Async at the edges only.
   *Source:* `crates/motif-core/src/storage.rs:52-71`;
   `MOTIF.md` decision 12.
-- `[gap]` **`FileStorage` fails at open on `wasm32`.** No filesystem
-  on the target. `MemoryStorage` covers the wasm path through v0.0.2;
-  a host-provided storage shim (OPFS / app sandbox / wasm-bindgen-
-  driven I/O) is the v0.0.3 "Run on a real device" North Star.
-  *Source:* `crates/motif-core/src/storage.rs:5-8`;
-  `MOTIF.md` v0.0.3 milestone.
+- ~~`[gap]` `FileStorage` fails at open on `wasm32`~~ —
+  **closed in v0.0.3-alpha.3** (with the obvious caveat that
+  `FileStorage` itself still doesn't work on wasm; what's closed is
+  the gap of "you can't persist on wasm at all"). The wasm host-
+  storage shim — `motif_wasm::WasmHostStorage` + the
+  `MotifHostStorage` JS interface — gives hosts a seam to plug in
+  OPFS, the iOS app sandbox, the Android internal-storage directory,
+  or whatever else they have access to. Concrete reference impls are
+  host territory (per the v0.0.3 plan).
+  *Source:* `crates/motif-wasm/src/host_storage.rs`.
 - `[scope]` **Single-namespace ID index.** Nodes and edges share
   `HashMap<String, IndexEntry>`. Globally unique ids today.
   Namespace split (separate node and edge maps) graduates to v0.0.4
@@ -438,12 +442,19 @@ pass can grep its way to the source.
 
 ## Bindings (`motif-wasm`, `motif-cli`)
 
-- `[scope]` **`Motif::open` on wasm uses `MemoryStorage`.** No
-  filesystem on `wasm32-unknown-unknown`, so the `storage.path` field
-  of the TOML config is ignored on the wasm path. A host-provided
-  storage shim (OPFS / app sandbox / wasm-bindgen-driven I/O) is
-  post-v0.0.1.
-  *Source:* `crates/motif-wasm/src/lib.rs:1-15`.
+- `[scope]` **`Motif::open` on wasm uses `MemoryStorage` by default;
+  hosts opt in to persistence via `Motif::open_with_host_storage`.**
+  v0.0.3-alpha.3 added the host-supplied path. `Motif::open` stays
+  in-memory (matches the working-cache shape; no surprise persistence
+  for hosts that don't ask). For real persistence across page loads
+  / app restarts, the host implements the `MotifHostStorage` JS
+  interface (`append` / `readAt` / `len` / `truncate` / optional
+  `freeSpace`) against OPFS, app sandbox, RN bridge, or whatever
+  else, and passes it to `Motif::open_with_host_storage(toml,
+  storage)`. The `storage.path` field of the TOML config is ignored
+  on both wasm paths — the host owns the medium.
+  *Source:* `crates/motif-wasm/src/lib.rs`,
+  `crates/motif-wasm/src/host_storage.rs`.
 - `[scope]` **Wasm params + result marshalled as JSON strings.** No
   `serde-wasm-bindgen` dependency; host wraps in `JSON.stringify` /
   `JSON.parse`. Acceptable through v0.0.2 (one allocation per call);
