@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/motif-core",
+    "crates/motif-ffi",
     "crates/motif-wasm",
     "crates/motif-cli",
 ]

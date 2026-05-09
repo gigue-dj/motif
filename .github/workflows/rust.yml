@@ -92,3 +92,37 @@ jobs:
         with:
           name: motif-wasm
           path: target/wasm32-unknown-unknown/release/motif_wasm.opt.wasm
+
+  native-targets:
+    # v0.0.3-alpha.4: cargo check for the ios/android cdylib targets.
+    # Uses `cargo check` not `cargo build` because a full link needs
+    # Apple's clang (Xcode) for iOS or the Android NDK for Android,
+    # neither of which is installed on the default ubuntu runner.
+    # Compilation is the meaningful smoke — it proves motif-core +
+    # motif-ffi build cleanly for these architectures. Full cdylib
+    # link verification is tracked as a v0.0.3-alpha.5 audit item
+    # (and at that point we may add a macOS runner for the iOS cdylib).
+    name: cargo check (aarch64-apple-ios + aarch64-linux-android)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-apple-ios
+          - aarch64-linux-android
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: native-${{ matrix.target }}
+
+      - name: cargo check (motif-core)
+        run: cargo check --release --target ${{ matrix.target }} -p motif-core
+
+      - name: cargo check (motif-ffi)
+        run: cargo check --release --target ${{ matrix.target }} -p motif-ffi

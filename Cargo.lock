@@ -262,6 +262,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "motif-ffi"
+version = "0.0.2"
+dependencies = [
+ "motif-core",
+]
+
+[[package]]
 name = "motif-wasm"
 version = "0.0.2"
 dependencies = [
