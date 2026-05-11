@@ -97,10 +97,24 @@ pass can grep its way to the source.
   `wasmtime` or similar and pay the runtime tax.
   *Source:* `MOTIF.md` decision 2; `rust-toolchain.toml`.
 - `[scope]` **WASM runtime perf tax** — host-runtime execution costs
-  ~2–5× vs. native Rust. Acceptable through v0.0.2; native `cdylib`
-  evaluation (`aarch64-apple-ios` + `aarch64-linux-android` via
-  `uniffi` or direct cdylib) lands in v0.0.3 ("Run on a real device").
+  ~2–5× vs. native Rust. Acceptable for hosts that pick wasm; the
+  v0.0.3-alpha.4 native `cdylib` path (`motif-ffi` crate) gives
+  `aarch64-apple-ios` + `aarch64-linux-android` consumers a way to
+  drop that tax.
   *Source:* `MOTIF.md` decision 2; v0.0.3 milestone.
+- `[scope]` **Native cdylib targets via `motif-ffi` (`cdylib` chosen
+  over `uniffi`).** v0.0.3-alpha.4 lands a tiny `motif-ffi` crate
+  (cdylib + rlib) that exposes a `extern "C"` surface — single
+  symbol shipped (`motif_version`), engine surface (`motif_open` /
+  `motif_query` / `motif_close`) lands in v0.0.4 alongside the
+  crates.io publish. CI covers both `aarch64-apple-ios` +
+  `aarch64-linux-android` via `cargo check` (full link needs Apple's
+  clang or the Android NDK; deferred to alpha.5 audit pass and
+  potentially a macOS CI runner). Workspace `unsafe_code = "forbid"`
+  is overridden inside `motif-ffi` only; every other crate stays
+  forbid-unsafe.
+  *Source:* `crates/motif-ffi/`; `.github/workflows/rust.yml`
+  (`native-targets` job); `MOTIF.md` v0.0.3 milestone.
 - `[scope]` **Internally usable only through v0.0.3** — all crates
   are `publish = false`. No crates.io, no semver guarantees.
   **First crates.io publish is v0.0.4** with a pre-v0.1 "fluid API;
@@ -551,10 +565,14 @@ pass can grep its way to the source.
   v0.0.5; PQ implementation itself is stretch. Opt-out is named
   `Engine::dangerously_*` — no quiet escape hatches.
   *Source:* `MOTIF.md` v0.0.5 milestone.
-- `[scope]` **`unsafe_code = "forbid"`** at the workspace level. This
-  is a *feature*, not a limitation; noted here so the audit pass can
-  confirm the lint is still in place.
-  *Source:* `Cargo.toml:21-22`.
+- `[scope]` **`unsafe_code = "forbid"`** at the workspace level, with
+  one explicit exception: `motif-ffi` (the C ABI shim crate added in
+  v0.0.3-alpha.4) overrides to `unsafe_code = "allow"` because pointer-
+  taking `extern "C"` signatures and `CStr::from_ptr` etc. unavoidably
+  need `unsafe`. Every other crate (motif-core, motif-wasm, motif-cli)
+  inherits the workspace forbid; the audit pass should confirm both
+  invariants — workspace forbid in place + motif-ffi the only relaxer.
+  *Source:* `Cargo.toml:21-22`; `crates/motif-ffi/Cargo.toml` (`[lints]`).
 
 ## C++ baseline (`cpp-reference/`)
 
