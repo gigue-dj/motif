@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.0.2"
+version = "0.0.3"
 edition = "2021"
 rust-version = "1.78"
 license = "MIT OR Apache-2.0"
@@ -40,7 +40,7 @@ tracing = { version = "0.1", default-features = false, features = ["std", "attri
 # target-gated in motif-core so wasm32 builds don't pull them.
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 fs2 = "0.4"
-motif-core = { path = "crates/motif-core", version = "0.0.2" }
+motif-core = { path = "crates/motif-core", version = "0.0.3" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
