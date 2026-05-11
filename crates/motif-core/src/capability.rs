@@ -36,8 +36,9 @@ use crate::storage::Storage;
 ///
 /// `storage` is consulted for `storage_mb` via [`Storage::free_space`].
 /// Native targets fill `cpu_cores` / `ram_mb` from `available_parallelism`
-/// / `sysinfo`; wasm32 leaves them `None` until alpha.3 adds the
-/// `navigator.*` probes.
+/// / `sysinfo`; wasm32 uses `navigator.hardwareConcurrency` and
+/// `navigator.deviceMemory` (Chrome-only for the latter; returns
+/// `None` on Firefox / Safari).
 pub fn probe(storage: &dyn Storage) -> CapabilityConfig {
     CapabilityConfig {
         ram_mb: probe_ram_mb(),
@@ -65,15 +66,38 @@ fn probe_ram_mb() -> Option<u64> {
 
 #[cfg(target_arch = "wasm32")]
 fn probe_ram_mb() -> Option<u64> {
-    // alpha.3 adds navigator.deviceMemory probing (Chrome-only;
-    // returns None elsewhere).
-    None
+    // navigator.deviceMemory is reported in GiB and intentionally
+    // coarse (rounded to one of 0.25, 0.5, 1, 2, 4, 8 per the spec
+    // — anti-fingerprinting). Chrome-only; Firefox / Safari return
+    // undefined and we fall through to None.
+    let gib = navigator_property("deviceMemory")?.as_f64()?;
+    Some((gib * 1024.0) as u64)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn probe_cpu_cores() -> Option<u32> {
     std::thread::available_parallelism()
         .ok()
         .map(|n| n.get() as u32)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn probe_cpu_cores() -> Option<u32> {
+    navigator_property("hardwareConcurrency")?
+        .as_f64()
+        .map(|n| n as u32)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn navigator_property(name: &str) -> Option<wasm_bindgen::JsValue> {
+    use wasm_bindgen::JsValue;
+    // `Reflect::get` on a missing-or-non-object target returns Err
+    // (the JS-side `TypeError`), which `.ok()?` swallows. Callers
+    // chain `.as_f64()?` / `.as_string()?` to filter undefined / null /
+    // wrong-type values — no need to guard those here.
+    let global = js_sys::global();
+    let nav = js_sys::Reflect::get(&global, &JsValue::from_str("navigator")).ok()?;
+    js_sys::Reflect::get(&nav, &JsValue::from_str(name)).ok()
 }
 
 fn probe_storage_mb(storage: &dyn Storage) -> Option<u64> {

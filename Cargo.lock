@@ -252,12 +252,14 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "gloo-timers",
+ "js-sys",
  "serde",
  "sysinfo",
  "tempfile",
  "thiserror",
  "toml",
  "tracing",
+ "wasm-bindgen",
  "wasm-bindgen-futures",
 ]
 

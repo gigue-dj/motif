@@ -86,6 +86,50 @@ pass can grep its way to the source.
 > needs an interleaved-test runner, lands in v0.0.3. `CapabilityConfig`
 > auto-discovery — hosts populate manually for v0.0.2; v0.0.3+ picks a
 > hardware-probe crate.
+>
+> **v0.0.3-alpha.1 added:** `tracing` (no-op default subscriber);
+> capability auto-discovery primary, TOML override per-field
+> (native probe via sysinfo / available_parallelism / fs2);
+> `motif bench --cold-start` harness; on-paper native target
+> decision (`cdylib`).
+>
+> **v0.0.3-alpha.2 added:** `Spawner` trait (native-only) + default
+> `StdThreadSpawner`; `Engine::with_controller_spawned_by`; wasm
+> sleep migrates to real `gloo_timers::TimeoutFuture`. Closed the
+> wasm-sleep `[gap]`.
+>
+> **v0.0.3-alpha.3 added:** wasm host-storage shim
+> (`motif_wasm::WasmHostStorage` + `MotifHostStorage` JS interface);
+> `Motif::open_with_host_storage` entry point; `Storage` trait
+> gains the `MaybeSend` marker so wasm impls holding `JsValue`
+> satisfy the trait. Closed the wasm-only-`MemoryStorage` `[gap]`.
+>
+> **v0.0.3-alpha.4 added:** `motif-ffi` crate (cdylib + rlib) with
+> the v0.0.3 minimum-viable C ABI shim (`motif_version`); CI matrix
+> for `aarch64-apple-ios` + `aarch64-linux-android` via
+> `cargo check`. Workspace `unsafe_code = "forbid"` overridden
+> inside motif-ffi only.
+>
+> **v0.0.3-alpha.5 retired (audit pass — closed by code fix):**
+> wasm capability probe — `navigator.deviceMemory` (RAM,
+> Chrome-only) + `navigator.hardwareConcurrency` (cores, broad
+> support) via `js-sys::Reflect` on `globalThis.navigator`. Closes
+> the alpha.3 wasm-probe deferral.
+>
+> **v0.0.3-alpha.5 knowingly accepted (audit pass — explicit
+> accept, deferred):** Native cdylib full-link CI (needs macOS
+> runner for iOS, NDK for Android) — `cargo check` matrix proves
+> compilation works; full link verification waits for v0.0.4
+> alongside the crates.io publish. Cold-start budget — measurement
+> harness ships in alpha.1 but no formal budget set; needs real
+> iOS / Android numbers, deferred to v0.0.4 when first consumers
+> arrive. Wasm-bindgen-test integration for `WasmHostStorage` —
+> needs a browser/Node CI runner; deferred to v0.0.4+ as well.
+> `EdgeConfig.foreshadow_eager = false` / `retention_confirmed_secs`
+> / `schema_cache = "fetch"` — carry forward unchanged from v0.0.2
+> (real bridge needed to validate any of these). `hoverphone` test
+> profile — carry forward to v0.0.6 (the "Scale and operate"
+> milestone) per the long-run strategy.
 
 ---
 
@@ -408,13 +452,16 @@ pass can grep its way to the source.
   *Source:* `crates/motif-core/tests/profiles.rs`; `MOTIF.md`
   decision 22.
 - ~~`[gap]` `CapabilityConfig` auto-discovery deferred to v0.0.3+~~
-  — **closed in v0.0.3-alpha.1.** Native probe via `sysinfo` (RAM)
-  + `std::thread::available_parallelism` (cores) + `fs2` via
-  `Storage::free_space` (disk) + `cfg!` (arch). Resolved at open
-  time; declared TOML fields override probe per-field. wasm32
-  probe defers to alpha.3 — alongside the storage shim, the
-  `navigator.*` probes land then. *Source:*
-  `crates/motif-core/src/capability.rs`.
+  — **closed across v0.0.3-alpha.1 + v0.0.3-alpha.5.** Native probe
+  (alpha.1): `sysinfo` (RAM) + `std::thread::available_parallelism`
+  (cores) + `fs2` via `Storage::free_space` (disk) + `cfg!` (arch).
+  wasm32 probe (alpha.5): `navigator.deviceMemory` (RAM; Chrome-only,
+  rounded for anti-fingerprinting, returns `None` on Firefox /
+  Safari) + `navigator.hardwareConcurrency` (cores; well-supported
+  on all evergreen browsers + Node + Deno + Bun). Both targets
+  share the same resolve semantics — declared TOML fields override
+  probe per-field.
+  *Source:* `crates/motif-core/src/capability.rs`.
 - `[scope]` **`Spawner` trait is native-only; wasm has no equivalent
   seam.** v0.0.3-alpha.2 added [`crate::sync::Spawner`] +
   [`crate::sync::StdThreadSpawner`] (default) +
@@ -598,11 +645,11 @@ combined pass:
 
 The v0.0.1 audit pass happened in PR #1; findings 1, 2, 4, 5, 6, 7 from
 that review were accepted as deferrable and tagged in this file as the
-v0.0.2 backlog. The v0.0.2 audit pass is v0.0.2-alpha.5 (this PR):
-findings 4, 6, 7 closed by code fix; finding 5 explicitly accepted.
-Plus v0.0.2's own debts: controller-kind validation closed
-(`with_named_controller`); replay-from-disk gap closed
-(`replay_unconfirmed`); WASM size, wasm sleep, foreshadow_eager,
-retention, schema_cache, hoverphone, capability auto-discovery all
-explicitly accepted with the reason inline. Same cadence applies
-between v0.0.2 and v0.0.3.
+v0.0.2 backlog. The v0.0.2 audit pass was v0.0.2-alpha.5: findings 4,
+6, 7 closed by code fix; finding 5 explicitly accepted. The v0.0.3
+audit pass is v0.0.3-alpha.5 (this PR): wasm capability probe closed
+by code fix; cold-start budget / wasm-bindgen-test CI / native cdylib
+full-link CI explicitly deferred to v0.0.4 alongside the crates.io
+publish (when first consumers anchor the budget); `EdgeConfig` knobs
++ `hoverphone` carry forward to their committed destinations per
+the long-run strategy. Same cadence applies between v0.0.3 and v0.0.4.
