@@ -31,6 +31,34 @@
 //! is fine; expecting the C ABI to survive a minor bump isn't. The
 //! v0.1.0 milestone freezes the API surface (per `MOTIF.md` long-run
 //! strategy).
+//!
+//! ## Pre-publish `unsafe` audit (BEFORE v0.0.4-alpha.5 crates.io)
+//!
+//! `motif-ffi` is the workspace's **only** `unsafe_code = "forbid"`
+//! relaxer. v0.0.3-alpha.4 shipped with no real `unsafe` blocks
+//! (just `#[no_mangle]` + `extern "C"` on a static-string return);
+//! v0.0.4-alpha.5 grows the engine surface (`motif_open` /
+//! `motif_query` / `motif_close`) with pointer-taking FFI and real
+//! `unsafe` blocks.
+//!
+//! Before flipping `publish = false` → `true`, every `unsafe` block
+//! must satisfy:
+//!
+//! - **SAFETY comment** above the block naming the caller invariants
+//!   it relies on.
+//! - **Pointer parameters validated** (non-null + alignment) before
+//!   any deref. Errors return a documented error code rather than UB.
+//! - **Handle ownership / lifetime documented** in the function's
+//!   rustdoc, and exercised by at least one test (round-trip:
+//!   `motif_open` → `motif_query` → `motif_close`).
+//! - **No `unsafe impl Send/Sync`** without an audited justification
+//!   that names the synchronization primitive enforcing the bound.
+//! - **C ABI types are stable**: no Rust enum discriminants leak
+//!   where the host can't see the layout (use opaque pointers /
+//!   `#[repr(C)]` with explicit discriminants).
+//!
+//! The checklist also lives in `LIMITATIONS.md`; the v0.0.4-alpha.5
+//! audit pass walks it explicitly before the publish step.
 
 // motif-ffi is the dedicated FFI seam: by construction it needs
 // `unsafe` for any signature that takes pointers (and for invoking

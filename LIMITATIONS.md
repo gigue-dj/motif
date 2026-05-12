@@ -686,6 +686,25 @@ pass can grep its way to the source.
   inherits the workspace forbid; the audit pass should confirm both
   invariants — workspace forbid in place + motif-ffi the only relaxer.
   *Source:* `Cargo.toml:21-22`; `crates/motif-ffi/Cargo.toml` (`[lints]`).
+- `[debt]` **`motif-ffi` `unsafe` surface needs a dedicated audit
+  before the v0.0.4-alpha.5 crates.io publish.** v0.0.3-alpha.4
+  shipped the crate with a single symbol (`motif_version`, no
+  pointer parameters, no actual `unsafe` in the lib body). v0.0.4-
+  alpha.5 grows the engine surface (`motif_open` / `motif_query` /
+  `motif_close`) — pointer-taking `extern "C"` functions with real
+  `unsafe` blocks and SAFETY invariants. Once that's drafted, run a
+  focused security pass before flipping `publish = false` → `true`:
+  - Every `unsafe` block carries a SAFETY comment that names the
+    caller invariants it relies on.
+  - Pointer parameters validate non-null / alignment before deref.
+  - Handle-passing conventions (engine pointer ownership / lifetime)
+    are documented in the function rustdoc and exercised by tests.
+  - No `unsafe impl Send/Sync` without an audited justification.
+  - C ABI types don't leak Rust enum discriminants where the host
+    can't see the layout.
+  The crates.io publish gates on this audit completing cleanly.
+  *Source:* `crates/motif-ffi/src/lib.rs`; `MOTIF.md` v0.0.4 + alpha.5
+  milestones.
 
 ## C++ baseline (`cpp-reference/`)
 
