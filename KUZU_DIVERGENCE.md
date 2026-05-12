@@ -83,13 +83,13 @@ indexes row below reflects current state vs target state.
 
 | Kuzu | Motif | Why |
 |---|---|---|
-| `BOOL`, `INT8…INT64`, `UINT8…UINT128`, `SERIAL`, `FLOAT`, `DOUBLE`, `STRING`, `BLOB`, `DATE`, `TIMESTAMP`, `INTERVAL`, `UUID`, `STRUCT`, `MAP`, `LIST`, `UNION`, `NODE`, `REL`, `RECURSIVE_REL`. | `Null`, `Bool`, `I64`, `F64`, `String`. Five scalar variants. | Property types follow query needs. v0.0.3+ adds whatever the query layer asks for next; we don't preempt. |
+| `BOOL`, `INT8…INT64`, `UINT8…UINT128`, `SERIAL`, `FLOAT`, `DOUBLE`, `STRING`, `BLOB`, `DATE`, `TIMESTAMP`, `INTERVAL`, `UUID`, `STRUCT`, `MAP`, `LIST`, `UNION`, `NODE`, `REL`, `RECURSIVE_REL`. | `Null`, `Bool`, `I64`, `F64`, `String`, `Timestamp` (epoch ms; alpha.3), `List` (heterogeneous; alpha.3). Seven variants shipped; `Blob` / `Map` / `Struct` discriminants reserved for v0.0.5+. | Property types follow query needs. Codec discriminant layout pencilled in `value.rs` so v0.0.5+ additions don't re-encode shipped data. We don't preempt typed lists, required-property markers, or the larger int / unsigned families until a caller asks. |
 
 ### Catalog / schema
 
 | Kuzu | Motif | Why |
 |---|---|---|
-| Engine owns the catalog: `CREATE NODE TABLE`, `CREATE REL TABLE`, schema migrations, type validation at insert. | Schema is **controller-owned**, pushed via `MutationOp::SchemaApply` over the same channel as mutations. Engine validates labels but not property types. No incremental migration — newer schema versions wholly replace older ones. | Motif is a follower; the upstream is the source of truth for shape. v0.0.3+ adds property-type validation if/when needed. |
+| Engine owns the catalog: `CREATE NODE TABLE`, `CREATE REL TABLE`, schema migrations, type validation at insert. | Schema is **controller-owned**, pushed via `MutationOp::SchemaApply` over the same channel as mutations. Engine validates labels (since v0.0.2-alpha.3) and property types (since v0.0.4-alpha.3); permissive on undeclared properties; `Value::Null` accepted for any declared type. No incremental migration — newer schema versions wholly replace older ones. | Motif is a follower; the upstream is the source of truth for shape. Required-property markers and typed lists wait for a caller need. |
 
 ### Bindings / distribution
 

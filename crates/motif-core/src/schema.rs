@@ -6,14 +6,16 @@
 //! surface a clean `EngineError::SchemaUnknown` rather than landing
 //! silently).
 //!
-//! v0.0.2-alpha.3 keeps schemas intentionally thin: they enumerate the
-//! known node and edge labels and the property names + scalar types
-//! each label may carry. Property-type validation, optional/required
-//! markings, and migration semantics are post-v0.0.2 work.
+//! v0.0.4-alpha.3 adds property-type validation: declared properties
+//! must arrive with values of the declared type (or `Value::Null`).
+//! Properties not declared in the schema are still accepted —
+//! permissive matches the schema-late posture for labels.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+
+use crate::value::Value;
 
 /// A controller-pushed schema. The `version` is monotonic; later
 /// versions supersede earlier ones in their entirety (no partial /
@@ -80,6 +82,10 @@ pub enum TableKind {
     Edge,
 }
 
+/// Declared property types. Adding new variants past index 5 requires
+/// the same discriminant-stability discipline as `Value` (see
+/// `value.rs` module doc) — `Schema` is persisted via
+/// `MutationOp::SchemaApply` so on-disk shape matters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PropertyType {
@@ -87,6 +93,32 @@ pub enum PropertyType {
     I64,
     F64,
     String,
+    /// Unix epoch milliseconds. Pairs with `Value::Timestamp`.
+    Timestamp,
+    /// Heterogeneous list. Pairs with `Value::List`. Element typing
+    /// is post-alpha.3 (`PropertyType::List(Box<PropertyType>)` would
+    /// break the `Copy` derive — wait until a caller asks).
+    List,
+}
+
+impl PropertyType {
+    /// True iff `value` matches this declared type. `Value::Null` is
+    /// always accepted (nullable-by-default; required-property markers
+    /// are post-alpha.3 work).
+    pub fn matches(&self, value: &Value) -> bool {
+        if matches!(value, Value::Null) {
+            return true;
+        }
+        matches!(
+            (self, value),
+            (PropertyType::Bool, Value::Bool(_))
+                | (PropertyType::I64, Value::I64(_))
+                | (PropertyType::F64, Value::F64(_))
+                | (PropertyType::String, Value::String(_))
+                | (PropertyType::Timestamp, Value::Timestamp(_))
+                | (PropertyType::List, Value::List(_))
+        )
+    }
 }
 
 #[cfg(test)]
@@ -116,5 +148,39 @@ mod tests {
         let bytes = bincode::serde::encode_to_vec(&s, cfg).unwrap();
         let (back, _): (Schema, _) = bincode::serde::decode_from_slice(&bytes, cfg).unwrap();
         assert_eq!(back, s);
+    }
+
+    #[test]
+    fn property_type_matches_for_each_variant() {
+        assert!(PropertyType::Bool.matches(&Value::Bool(true)));
+        assert!(PropertyType::I64.matches(&Value::I64(0)));
+        assert!(PropertyType::F64.matches(&Value::F64(0.0)));
+        assert!(PropertyType::String.matches(&Value::String("x".into())));
+        assert!(PropertyType::Timestamp.matches(&Value::Timestamp(0)));
+        assert!(PropertyType::List.matches(&Value::List(vec![])));
+    }
+
+    #[test]
+    fn property_type_matches_null_for_any_declared_type() {
+        // Null = "no value present", always allowed; required-field
+        // markers are post-alpha.3.
+        for ty in [
+            PropertyType::Bool,
+            PropertyType::I64,
+            PropertyType::F64,
+            PropertyType::String,
+            PropertyType::Timestamp,
+            PropertyType::List,
+        ] {
+            assert!(ty.matches(&Value::Null), "{ty:?} should accept Null");
+        }
+    }
+
+    #[test]
+    fn property_type_rejects_mismatch() {
+        assert!(!PropertyType::I64.matches(&Value::F64(0.0)));
+        assert!(!PropertyType::F64.matches(&Value::I64(0)));
+        assert!(!PropertyType::Timestamp.matches(&Value::I64(0)));
+        assert!(!PropertyType::List.matches(&Value::String("[]".into())));
     }
 }

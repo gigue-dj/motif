@@ -17,6 +17,9 @@ pub enum Token {
     Where,
     Return,
     Delete,
+    /// Optional prefix to `DELETE` that triggers cascade semantics
+    /// (delete the bound node + every incident edge). v0.0.4-alpha.3.
+    Detach,
     Limit,
     And,
     Or,
@@ -64,6 +67,7 @@ impl fmt::Display for Token {
             Token::Where => write!(f, "WHERE"),
             Token::Return => write!(f, "RETURN"),
             Token::Delete => write!(f, "DELETE"),
+            Token::Detach => write!(f, "DETACH"),
             Token::Limit => write!(f, "LIMIT"),
             Token::And => write!(f, "AND"),
             Token::Or => write!(f, "OR"),
@@ -349,6 +353,7 @@ fn keyword_or_ident(s: &str) -> Token {
         "WHERE" => Token::Where,
         "RETURN" => Token::Return,
         "DELETE" => Token::Delete,
+        "DETACH" => Token::Detach,
         "LIMIT" => Token::Limit,
         "AND" => Token::And,
         "OR" => Token::Or,

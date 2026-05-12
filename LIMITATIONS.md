@@ -155,6 +155,25 @@ pass can grep its way to the source.
 > `RBracket`, `Arrow`, `Dash`) with `-`-vs-`->`-vs-negative-literal
 > disambiguation. `Statement::MatchReturn` + `MatchDelete` now
 > carry `Vec<Pattern>` instead of a single `NodePattern`.
+>
+> **v0.0.4-alpha.3 added:** property-type expansion + schema
+> property-type validation + `DETACH DELETE` cascade. `Value` gains
+> `Timestamp(i64)` (epoch ms) and `List(Vec<Value>)` variants;
+> `PropertyType` matches with `Timestamp` and `List`; format version
+> bumps to 4 (older stores rejected at open). Codec discriminant
+> layout pencilled in `value.rs` module doc with reservations for
+> v0.0.5+ `Blob` / `Map` / `Struct`, fingerprinted by a unit test.
+> `Engine::insert_node` / `insert_edge` validate property types
+> against the current schema and surface
+> `EngineError::SchemaPropertyTypeMismatch` (label, property,
+> declared, actual, schema_version) on disagreement; permissive on
+> undeclared properties; `Value::Null` accepted for any declared
+> type. `Engine::delete_node_with_cascade` + Cypher
+> `DETACH DELETE n` remove a node + every incident edge. Schema-race
+> recovery is permissive — recovered records replay regardless of
+> the latest schema's label set, closing v0.0.2 exit criterion 5
+> with a clean error path for new inserts under the latest schema
+> rather than silent corruption.
 
 ---
 
@@ -298,13 +317,17 @@ pass can grep its way to the source.
   (N nodes + M edges still = N + M entries).
   *Source:* `crates/motif-core/src/engine.rs`;
   `crates/motif-core/tests/namespace_split.rs`.
-- `[debt]` **No referential integrity on node delete.** Deleting a
-  node that has incoming/outgoing edges leaves them dangling; the
-  query layer treats them as unreachable. `DETACH DELETE` /
-  cascade lands in v0.0.4 alongside the rest of the Cypher surface
-  growth.
-  *Source:* `crates/motif-core/src/engine.rs:200-211`;
-  `MOTIF.md` v0.0.4 milestone.
+- ~~`[debt]` No referential integrity on node delete~~ —
+  **partially closed in v0.0.4-alpha.3.** `DETACH DELETE` (Cypher) +
+  `Engine::delete_node_with_cascade` (programmatic) remove a node
+  along with every incident edge. Plain `DELETE n` / `delete_node`
+  intentionally **still** leaves edges dangling — that's the
+  documented two-tier shape: callers opt in to cascade explicitly.
+  Walking `iter_edges` to find incident edges is O(N_total_edges) —
+  documented below as a `[perf]` debt that the v0.0.4-alpha.4
+  `(from, label)` adjacency index closes.
+  *Source:* `crates/motif-core/src/engine.rs` (`delete_node_with_cascade`);
+  `crates/motif-core/tests/detach_delete.rs`.
 - `[perf]` **`iter_nodes` / `iter_edges` are O(N) reads.**
   v0.0.4-alpha.1 added `iter_edges_by_label(&str)` backed by the new
   `edge_by_label` index — `MATCH ()-[r:LABEL]->()` (lands in alpha.2)
@@ -315,10 +338,24 @@ pass can grep its way to the source.
   stay deferred (10k node ceiling makes O(N_nodes) cheap).
   *Source:* `crates/motif-core/src/engine.rs` (`iter_edges_by_label`);
   `MOTIF.md` v0.0.4 milestone.
-- `[debt]` **Property values are limited to 5 scalar variants.**
-  `Null`, `Bool`, `I64`, `F64`, `String`. No timestamps, no blobs, no
-  lists, no nested structs. Expanded when the query layer needs more.
-  *Source:* `crates/motif-core/src/value.rs:1-13`.
+- `[scope]` **Property values: 7 variants shipped, more reserved.**
+  `Null`, `Bool`, `I64`, `F64`, `String`, `Timestamp` (alpha.3),
+  `List` (alpha.3). v0.0.5+ reservations: `Blob` (encryption-at-rest
+  payloads), `Map` (keyed bag), `Struct` (named-field record).
+  Discriminant layout pencilled in `crates/motif-core/src/value.rs`
+  module-doc + fingerprinted by a unit test so a reorder breaks
+  loudly. Adding any variant past index 6 bumps `FORMAT_VERSION`.
+  Required-property markers and typed lists
+  (`PropertyType::List(Box<PropertyType>)`) wait for a caller need.
+  *Source:* `crates/motif-core/src/value.rs`,
+  `crates/motif-core/src/schema.rs` (`PropertyType`).
+- `[perf]` **`delete_node_with_cascade` walks `iter_edges`.** O(N_total_edges) per
+  call. Same scan path as the v0.0.4-alpha.2 `path_candidates`
+  `edge.from` filter — a `(from, label) → edge_ids` adjacency index
+  collapses both to O(degree). Close before the v0.0.4-alpha.4 perf
+  benchmark vs upstream Kuzu.
+  *Source:* `crates/motif-core/src/engine.rs`
+  (`delete_node_with_cascade`).
 - ~~`[debt]` `Storage::truncate` does not enforce
   `new_len >= HEADER_LEN`~~ — **closed in v0.0.2-alpha.5.** Both
   `FileStorage::truncate` and `MemoryStorage::truncate` now return

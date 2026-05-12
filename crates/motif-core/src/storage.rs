@@ -23,14 +23,16 @@ pub(crate) const MAGIC: &[u8; 8] = b"MOTIF\0\0\x01";
 /// - 1 → 2 in v0.0.2-alpha.1: the on-disk record collapsed from
 ///   `Record::*` enum variants into a single `Mutation` shape.
 /// - 2 → 3 in v0.0.2-alpha.3: `MutationOp` gained `SchemaApply(Schema)`.
-///   Existing variant tags 0-3 are unchanged, but stores that contain
-///   a tag-4 record cannot be decoded by alpha.2 binaries — bumping
-///   the format version makes that incompatibility explicit.
+/// - 3 → 4 in v0.0.4-alpha.3: `Value` gained `Timestamp(i64)` and
+///   `List(Vec<Value>)` variants (discriminants 5 and 6); `PropertyType`
+///   gained matching `Timestamp` and `List`. Existing variant tags
+///   0-4 are unchanged, but a tag-5 / tag-6 value cannot be decoded
+///   by older binaries — the format-version bump makes that explicit.
 ///
 /// Older stores are rejected at open with `StorageError::BadVersion` —
 /// no migration tooling per the "bleeding-edge until outside contributors
 /// arrive" decision.
-pub(crate) const FORMAT_VERSION: u32 = 3;
+pub(crate) const FORMAT_VERSION: u32 = 4;
 pub(crate) const HEADER_LEN: u64 = 16;
 
 #[derive(Debug, thiserror::Error)]

@@ -23,11 +23,16 @@ pub enum Statement {
         return_items: Vec<ReturnItem>,
         limit: Option<u64>,
     },
-    /// `MATCH p1[, p2, ...] [WHERE expr] DELETE var`
+    /// `MATCH p1[, p2, ...] [WHERE expr] [DETACH] DELETE var`. When
+    /// `detach` is true, the bound node is deleted along with every
+    /// edge incident to it (Cypher cascade); when false, deleting a
+    /// node that still has incident edges leaves them dangling
+    /// (matches the engine's plain `delete_node`).
     MatchDelete {
         patterns: Vec<Pattern>,
         where_clause: Option<Expr>,
         variable: String,
+        detach: bool,
     },
 }
 

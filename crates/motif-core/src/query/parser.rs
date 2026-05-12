@@ -127,23 +127,30 @@ impl<'a> Parser<'a> {
                             limit,
                         })
                     }
-                    Some(Token::Delete) => {
-                        self.advance();
+                    Some(Token::Delete) | Some(Token::Detach) => {
+                        let detach = if matches!(self.peek(), Some(Token::Detach)) {
+                            self.advance();
+                            true
+                        } else {
+                            false
+                        };
+                        self.expect(&Token::Delete, "DELETE")?;
                         let variable = self.expect_ident("variable to DELETE")?;
                         self.expect_end()?;
                         Ok(Statement::MatchDelete {
                             patterns,
                             where_clause,
                             variable,
+                            detach,
                         })
                     }
                     Some(t) => Err(ParseError::Unexpected {
                         token: t.to_string(),
-                        expected: "RETURN or DELETE".into(),
+                        expected: "RETURN, DELETE, or DETACH DELETE".into(),
                         offset: self.peek_offset(),
                     }),
                     None => Err(ParseError::UnexpectedEnd {
-                        expected: "RETURN or DELETE".into(),
+                        expected: "RETURN, DELETE, or DETACH DELETE".into(),
                     }),
                 }
             }
