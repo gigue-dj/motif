@@ -97,7 +97,15 @@ pub fn execute(
             patterns,
             where_clause,
             variable,
-        } => exec_match_delete(engine, patterns, where_clause.as_ref(), variable, params),
+            detach,
+        } => exec_match_delete(
+            engine,
+            patterns,
+            where_clause.as_ref(),
+            variable,
+            *detach,
+            params,
+        ),
     }
 }
 
@@ -190,6 +198,7 @@ fn exec_match_delete(
     patterns: &[Pattern],
     where_clause: Option<&Expr>,
     variable: &str,
+    detach: bool,
     params: &Params,
 ) -> Result<QueryResult, InterpretError> {
     let rows = find_match_rows(engine, patterns, where_clause, params, None)?;
@@ -199,9 +208,15 @@ fn exec_match_delete(
         };
         match binding {
             Binding::Node(n) => {
-                engine
-                    .delete_node(&n.id)
-                    .map_err(|e| InterpretError::TypeMismatch(e.to_string()))?;
+                if detach {
+                    engine
+                        .delete_node_with_cascade(&n.id)
+                        .map_err(|e| InterpretError::TypeMismatch(e.to_string()))?;
+                } else {
+                    engine
+                        .delete_node(&n.id)
+                        .map_err(|e| InterpretError::TypeMismatch(e.to_string()))?;
+                }
             }
             Binding::Edge(_) => return Err(InterpretError::DeleteEdgeUnsupported),
         }

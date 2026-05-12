@@ -54,6 +54,16 @@ pub enum EngineError {
         "unknown label {label}: not declared in the current schema (version {schema_version})"
     )]
     SchemaUnknown { label: String, schema_version: u64 },
+    #[error(
+        "property {property} on label {label}: declared {declared:?} but value is {actual} (schema version {schema_version})"
+    )]
+    SchemaPropertyTypeMismatch {
+        label: String,
+        property: String,
+        declared: crate::schema::PropertyType,
+        actual: &'static str,
+        schema_version: u64,
+    },
     #[error("controller kind mismatch: config declared {declared:?}, host wired {wired:?}")]
     ControllerKindMismatch { declared: String, wired: String },
 }
@@ -440,6 +450,7 @@ impl Engine {
             return Err(EngineError::DuplicateId(node.id));
         }
         self.validate_label(&node.label)?;
+        self.validate_properties(&node.label, &node.properties)?;
         self.commit(MutationOp::NodeInsert(node))
     }
 
@@ -454,6 +465,7 @@ impl Engine {
             return Err(EngineError::MissingNode(edge.to));
         }
         self.validate_label(&edge.label)?;
+        self.validate_properties(&edge.label, &edge.properties)?;
         self.commit(MutationOp::EdgeInsert(edge))
     }
 
@@ -496,16 +508,83 @@ impl Engine {
         }
     }
 
-    /// Delete a node by id. v0.0.2 still does not enforce referential
-    /// integrity: edges that reference a deleted node become dangling
-    /// (the query layer treats them as unreachable). `DETACH DELETE`-
-    /// style cascade is a v0.0.3+ design item.
+    /// Reject inserts whose property values disagree with the
+    /// declared `PropertyType`. v0.0.4-alpha.3 is permissive on
+    /// undeclared properties (the schema declares what it knows;
+    /// extra properties pass through). `Value::Null` matches every
+    /// declared type — required-property markers are post-alpha.3.
+    /// No-op when no schema is set.
+    fn validate_properties(
+        &self,
+        label: &str,
+        properties: &crate::graph::Properties,
+    ) -> Result<(), EngineError> {
+        let Some(schema) = &self.current_schema else {
+            return Ok(());
+        };
+        // Caller invariant: `validate_label` runs first; the label is
+        // known here. Defensive fall-through keeps a missing-table
+        // race from panicking.
+        let Some(table) = schema.table(label) else {
+            return Ok(());
+        };
+        for (name, declared) in &table.properties {
+            if let Some(value) = properties.get(name) {
+                if !declared.matches(value) {
+                    return Err(EngineError::SchemaPropertyTypeMismatch {
+                        label: label.to_owned(),
+                        property: name.clone(),
+                        declared: *declared,
+                        actual: value.type_name(),
+                        schema_version: schema.version,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Delete a node by id. **Does not** delete incident edges;
+    /// callers that need cascade semantics use
+    /// [`Engine::delete_node_with_cascade`] (v0.0.4-alpha.3+) or the
+    /// `MATCH (n) ... DETACH DELETE n` Cypher form.
     pub fn delete_node(&mut self, id: &str) -> Result<bool, EngineError> {
         if !self.has_node(id) {
             return Ok(false);
         }
         self.commit(MutationOp::NodeDelete(id.to_owned()))?;
         Ok(true)
+    }
+
+    /// Delete a node and every edge that references it as `from` or
+    /// `to` — Cypher's `DETACH DELETE` semantics. Returns
+    /// `Ok((true, edges_removed))` if the node existed; `Ok((false, 0))`
+    /// otherwise. Edge deletes commit before the node delete so a
+    /// crash mid-cascade leaves a consistent (no-dangling-edges)
+    /// store on recovery.
+    ///
+    /// O(N_total_edges): walks `iter_edges` to find incident edges.
+    /// At the gigue B2B target (1M+ edges) this is the same scan
+    /// path documented as a `[perf]` debt in `LIMITATIONS.md`; the
+    /// `(from, label)` adjacency index that closes that debt also
+    /// closes this one (close before the v0.0.4-alpha.4 perf
+    /// benchmark).
+    pub fn delete_node_with_cascade(&mut self, id: &str) -> Result<(bool, usize), EngineError> {
+        if !self.has_node(id) {
+            return Ok((false, 0));
+        }
+        let edges = self.iter_edges()?;
+        let incident: Vec<String> = edges
+            .into_iter()
+            .filter(|e| e.from == id || e.to == id)
+            .map(|e| e.id)
+            .collect();
+        let count = incident.len();
+        for edge_id in incident {
+            self.commit(MutationOp::EdgeDelete(edge_id))?;
+        }
+        self.commit(MutationOp::NodeDelete(id.to_owned()))?;
+        Ok((true, count))
     }
 
     pub fn delete_edge(&mut self, id: &str) -> Result<bool, EngineError> {
