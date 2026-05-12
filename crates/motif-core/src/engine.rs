@@ -421,11 +421,9 @@ impl Engine {
             // the bucket entry.
             return Err(EngineError::Recovery {
                 offset: entry.offset,
-                source: crate::record::RecordError::Decode(
-                    bincode::error::DecodeError::Other(
-                        "edge_index entry did not decode to an EdgeInsert",
-                    ),
-                ),
+                source: crate::record::RecordError::Decode(bincode::error::DecodeError::Other(
+                    "edge_index entry did not decode to an EdgeInsert",
+                )),
             });
         };
         if let Some(bucket) = self.edge_by_label.get_mut(&e.label) {
