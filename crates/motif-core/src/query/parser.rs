@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use super::ast::{BinOp, Expr, NodePattern, ReturnItem, Statement};
+use super::ast::{BinOp, EdgePattern, Expr, NodePattern, Pattern, ReturnItem, Statement};
 use super::lexer::{LexError, Spanned, Token};
 use crate::value::Value;
 
@@ -102,7 +102,7 @@ impl<'a> Parser<'a> {
             }
             Some(Token::Match) => {
                 self.advance();
-                let pattern = self.parse_node_pattern()?;
+                let patterns = self.parse_pattern_list()?;
                 let where_clause = if matches!(self.peek(), Some(Token::Where)) {
                     self.advance();
                     Some(self.parse_expr()?)
@@ -121,7 +121,7 @@ impl<'a> Parser<'a> {
                         };
                         self.expect_end()?;
                         Ok(Statement::MatchReturn {
-                            pattern,
+                            patterns,
                             where_clause,
                             return_items,
                             limit,
@@ -132,7 +132,7 @@ impl<'a> Parser<'a> {
                         let variable = self.expect_ident("variable to DELETE")?;
                         self.expect_end()?;
                         Ok(Statement::MatchDelete {
-                            pattern,
+                            patterns,
                             where_clause,
                             variable,
                         })
@@ -170,6 +170,64 @@ impl<'a> Parser<'a> {
         };
         self.expect(&Token::RParen, ")")?;
         Ok(NodePattern {
+            variable,
+            label,
+            properties,
+        })
+    }
+
+    /// `MATCH p1[, p2, ...]` — comma-separated patterns.
+    fn parse_pattern_list(&mut self) -> Result<Vec<Pattern>, ParseError> {
+        let mut patterns = vec![self.parse_pattern()?];
+        while matches!(self.peek(), Some(Token::Comma)) {
+            self.advance();
+            patterns.push(self.parse_pattern()?);
+        }
+        Ok(patterns)
+    }
+
+    /// A single pattern: `(node)` or `(start)-[e]->(b)-[f]->(c)...`.
+    fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
+        let start = self.parse_node_pattern()?;
+        let mut chain = Vec::new();
+        while matches!(self.peek(), Some(Token::Dash)) {
+            let edge = self.parse_edge_pattern()?;
+            let target = self.parse_node_pattern()?;
+            chain.push((edge, target));
+        }
+        if chain.is_empty() {
+            Ok(Pattern::Node(start))
+        } else {
+            Ok(Pattern::Path { start, chain })
+        }
+    }
+
+    /// `-[variable[:Label][{props}]]->`. The caller's `peek` must have
+    /// already seen the leading `-` (so the dispatch in `parse_pattern`
+    /// reached this function); this function consumes it. v0.0.4-alpha.2
+    /// supports only the directed-right form `->`; inverse `<-` is
+    /// post-alpha.2.
+    fn parse_edge_pattern(&mut self) -> Result<EdgePattern, ParseError> {
+        self.expect(&Token::Dash, "-")?;
+        self.expect(&Token::LBracket, "[")?;
+        let variable = self.expect_ident("relationship variable")?;
+        let label = if matches!(self.peek(), Some(Token::Colon)) {
+            self.advance();
+            Some(self.expect_ident("relationship label")?)
+        } else {
+            None
+        };
+        let properties = if matches!(self.peek(), Some(Token::LBrace)) {
+            self.parse_property_map()?
+        } else {
+            BTreeMap::new()
+        };
+        self.expect(&Token::RBracket, "]")?;
+        // The closing arrow `]->` lexes as RBracket + Arrow because
+        // the lexer collapsed `-` + `>` into a single Arrow token at
+        // tokenisation time.
+        self.expect(&Token::Arrow, "->")?;
+        Ok(EdgePattern {
             variable,
             label,
             properties,
@@ -442,12 +500,16 @@ mod tests {
         let s = parse("MATCH (n) WHERE id(n) = $x RETURN n").unwrap();
         match s {
             Statement::MatchReturn {
-                pattern,
+                patterns,
                 where_clause,
                 return_items,
                 limit,
             } => {
-                assert_eq!(pattern.variable, "n");
+                assert_eq!(patterns.len(), 1);
+                assert!(matches!(
+                    &patterns[0],
+                    Pattern::Node(NodePattern { variable, .. }) if variable == "n"
+                ));
                 assert!(where_clause.is_some());
                 assert_eq!(return_items, vec![ReturnItem::Variable("n".into())]);
                 assert!(limit.is_none());
@@ -463,6 +525,60 @@ mod tests {
             Statement::MatchDelete { variable, .. } => assert_eq!(variable, "n"),
             _ => panic!("expected MatchDelete"),
         }
+    }
+
+    #[test]
+    fn parses_single_edge_pattern() {
+        let s = parse("MATCH (a)-[r]->(b) RETURN r").unwrap();
+        let Statement::MatchReturn { patterns, .. } = s else {
+            panic!("expected MatchReturn");
+        };
+        assert_eq!(patterns.len(), 1);
+        let Pattern::Path { start, chain } = &patterns[0] else {
+            panic!("expected Path");
+        };
+        assert_eq!(start.variable, "a");
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].0.variable, "r");
+        assert!(chain[0].0.label.is_none());
+        assert_eq!(chain[0].1.variable, "b");
+    }
+
+    #[test]
+    fn parses_edge_pattern_with_label_and_inline_props() {
+        let s = parse("MATCH (a)-[r:KNOWS {since: 2020}]->(b) RETURN r").unwrap();
+        let Statement::MatchReturn { patterns, .. } = s else {
+            panic!()
+        };
+        let Pattern::Path { chain, .. } = &patterns[0] else {
+            panic!()
+        };
+        assert_eq!(chain[0].0.label.as_deref(), Some("KNOWS"));
+        assert_eq!(chain[0].0.properties.len(), 1);
+        assert!(chain[0].0.properties.contains_key("since"));
+    }
+
+    #[test]
+    fn parses_multi_hop_path() {
+        let s = parse("MATCH (a)-[r:KNOWS]->(b)-[s:FOLLOWS]->(c) RETURN c").unwrap();
+        let Statement::MatchReturn { patterns, .. } = s else {
+            panic!()
+        };
+        let Pattern::Path { chain, .. } = &patterns[0] else {
+            panic!()
+        };
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[0].0.label.as_deref(), Some("KNOWS"));
+        assert_eq!(chain[1].0.label.as_deref(), Some("FOLLOWS"));
+    }
+
+    #[test]
+    fn parses_multi_pattern_match() {
+        let s = parse("MATCH (a)-[r]->(b), (b)-[s]->(c) RETURN c").unwrap();
+        let Statement::MatchReturn { patterns, .. } = s else {
+            panic!()
+        };
+        assert_eq!(patterns.len(), 2);
     }
 
     #[test]

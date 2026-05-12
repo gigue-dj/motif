@@ -1,24 +1,25 @@
 //! Direct interpreter: walks an AST and calls into [`Engine`]. No
 //! planner, no optimizer — the AST is the plan.
 //!
-//! Pattern matching for `MATCH` is constant-time when the `WHERE`
-//! contains a top-level `id(n) = $x` (or `id(n) = literal`) predicate,
-//! and an O(N) scan otherwise. Label and property predicates filter the
-//! scan.
+//! Match performance: constant-time when `WHERE id(n) = $x` is at
+//! the top level of a conjunction (uses the engine's id index);
+//! O(label_bucket) for `MATCH ()-[r:LABEL]->()` (uses
+//! `edge_by_label`); O(N) scan otherwise. Inline-property predicates
+//! on edge patterns filter within the label bucket — see LIMITATIONS
+//! for the perf-debt note on the missing `from`-keyed adjacency
+//! index.
 //!
-//! v0.0.2-alpha.1 added the `_motif` metadata-as-data namespace per
-//! MOTIF.md decision 19. Property paths of the form `n._motif.<key>`
-//! resolve against the engine's runtime state rather than the on-disk
-//! node properties: `n._motif.foreshadow` returns the foreshadow flag,
-//! and any other `_motif.X` key returns `Value::Null` (extension space
-//! reserved for future metadata).
+//! `_motif.<key>` paths in `WHERE` / `RETURN` resolve against
+//! engine state rather than on-disk properties (MOTIF.md decision 19;
+//! `_motif.foreshadow` → live foreshadow flag, `_motif.schema.version`
+//! → current schema version, unknown keys → `Value::Null`).
 
 use std::collections::BTreeMap;
 
-use super::ast::{BinOp, Expr, NodePattern, ReturnItem, Statement};
+use super::ast::{BinOp, EdgePattern, Expr, NodePattern, Pattern, ReturnItem, Statement};
 use super::result::{QueryResult, ResultCell};
 use crate::engine::Engine;
-use crate::graph::Node;
+use crate::graph::{Edge, Node};
 use crate::value::Value;
 
 pub type Params = BTreeMap<String, Value>;
@@ -39,11 +40,37 @@ pub enum InterpretError {
     MergeMissingId,
     #[error("MERGE/CREATE require a label")]
     MissingLabel,
-    #[error("DELETE variable {0} does not match MATCH variable")]
+    #[error("DELETE variable {0} does not match any pattern variable")]
     DeleteVariableMismatch(String),
+    #[error(
+        "DELETE on an edge variable is not supported (v0.0.4-alpha.2); delete via the engine API"
+    )]
+    DeleteEdgeUnsupported,
     #[error("nested property paths are not supported (got {0})")]
     NestedPath(String),
 }
+
+/// A single bound entity in a result row. Edge patterns bind both the
+/// edge variable and its endpoint node variables.
+#[derive(Debug, Clone)]
+enum Binding {
+    Node(Node),
+    Edge(Edge),
+}
+
+impl Binding {
+    fn id(&self) -> &str {
+        match self {
+            Binding::Node(n) => &n.id,
+            Binding::Edge(e) => &e.id,
+        }
+    }
+}
+
+/// Per-row variable → binding map. Variable names are unique within
+/// a row; cross-pattern shared variables must agree before a row is
+/// emitted (enforced by `unify_bindings`).
+type Bindings = BTreeMap<String, Binding>;
 
 pub fn execute(
     engine: &mut Engine,
@@ -54,23 +81,23 @@ pub fn execute(
         Statement::Create { pattern } => exec_create(engine, pattern, params),
         Statement::Merge { pattern } => exec_merge(engine, pattern, params),
         Statement::MatchReturn {
-            pattern,
+            patterns,
             where_clause,
             return_items,
             limit,
         } => exec_match_return(
             engine,
-            pattern,
+            patterns,
             where_clause.as_ref(),
             return_items,
             *limit,
             params,
         ),
         Statement::MatchDelete {
-            pattern,
+            patterns,
             where_clause,
             variable,
-        } => exec_match_delete(engine, pattern, where_clause.as_ref(), variable, params),
+        } => exec_match_delete(engine, patterns, where_clause.as_ref(), variable, params),
     }
 }
 
@@ -121,13 +148,13 @@ fn exec_merge(
 
 fn exec_match_return(
     engine: &mut Engine,
-    pattern: &NodePattern,
+    patterns: &[Pattern],
     where_clause: Option<&Expr>,
     return_items: &[ReturnItem],
     limit: Option<u64>,
     params: &Params,
 ) -> Result<QueryResult, InterpretError> {
-    let matches = find_matches(engine, pattern, where_clause, params, limit)?;
+    let rows = find_match_rows(engine, patterns, where_clause, params, limit)?;
 
     let columns = return_items
         .iter()
@@ -144,45 +171,107 @@ fn exec_match_return(
         })
         .collect();
 
-    let mut rows = Vec::with_capacity(matches.len());
-    for node in matches {
+    let mut out_rows = Vec::with_capacity(rows.len());
+    for bindings in rows {
         let mut row = Vec::with_capacity(return_items.len());
         for r in return_items {
-            row.push(project(r, &pattern.variable, &node, engine)?);
+            row.push(project(r, &bindings, engine)?);
         }
-        rows.push(row);
+        out_rows.push(row);
     }
-    Ok(QueryResult { columns, rows })
+    Ok(QueryResult {
+        columns,
+        rows: out_rows,
+    })
 }
 
 fn exec_match_delete(
     engine: &mut Engine,
-    pattern: &NodePattern,
+    patterns: &[Pattern],
     where_clause: Option<&Expr>,
     variable: &str,
     params: &Params,
 ) -> Result<QueryResult, InterpretError> {
-    if variable != pattern.variable {
-        return Err(InterpretError::DeleteVariableMismatch(variable.to_owned()));
-    }
-    let matches = find_matches(engine, pattern, where_clause, params, None)?;
-    for node in matches {
-        engine
-            .delete_node(&node.id)
-            .map_err(|e| InterpretError::TypeMismatch(e.to_string()))?;
+    let rows = find_match_rows(engine, patterns, where_clause, params, None)?;
+    for bindings in rows {
+        let Some(binding) = bindings.get(variable) else {
+            return Err(InterpretError::DeleteVariableMismatch(variable.to_owned()));
+        };
+        match binding {
+            Binding::Node(n) => {
+                engine
+                    .delete_node(&n.id)
+                    .map_err(|e| InterpretError::TypeMismatch(e.to_string()))?;
+            }
+            Binding::Edge(_) => return Err(InterpretError::DeleteEdgeUnsupported),
+        }
     }
     Ok(QueryResult::empty())
 }
 
 // ---- pattern matching ----
 
-fn find_matches(
+/// Produce the rows of bindings that satisfy every pattern in
+/// `patterns` and the optional `where_clause`. Each row is a single
+/// `Bindings` map covering every pattern variable.
+fn find_match_rows(
+    engine: &mut Engine,
+    patterns: &[Pattern],
+    where_clause: Option<&Expr>,
+    params: &Params,
+    limit: Option<u64>,
+) -> Result<Vec<Bindings>, InterpretError> {
+    let mut rows: Vec<Bindings> = vec![Bindings::new()];
+    for pattern in patterns {
+        let candidates = candidates_for_pattern(engine, pattern, where_clause, params)?;
+        let mut next: Vec<Bindings> = Vec::new();
+        for existing in &rows {
+            for candidate in &candidates {
+                if let Some(merged) = unify_bindings(existing, candidate) {
+                    next.push(merged);
+                }
+            }
+        }
+        rows = next;
+        if rows.is_empty() {
+            return Ok(rows);
+        }
+    }
+
+    let mut out: Vec<Bindings> = Vec::with_capacity(rows.len());
+    for row in rows {
+        if eval_predicate(where_clause, &row, params, engine)? {
+            out.push(row);
+            if let Some(l) = limit {
+                if out.len() as u64 >= l {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Candidate bindings produced by a single pattern, before
+/// cross-pattern unification.
+fn candidates_for_pattern(
+    engine: &mut Engine,
+    pattern: &Pattern,
+    where_clause: Option<&Expr>,
+    params: &Params,
+) -> Result<Vec<Bindings>, InterpretError> {
+    match pattern {
+        Pattern::Node(np) => node_candidates(engine, np, where_clause, params),
+        Pattern::Path { start, chain } => path_candidates(engine, start, chain, params),
+    }
+}
+
+fn node_candidates(
     engine: &mut Engine,
     pattern: &NodePattern,
     where_clause: Option<&Expr>,
     params: &Params,
-    limit: Option<u64>,
-) -> Result<Vec<Node>, InterpretError> {
+) -> Result<Vec<Bindings>, InterpretError> {
     // Fast path: WHERE id(n) = <scalar>. Constant-time index lookup.
     if let Some(id_value) = extract_id_predicate(where_clause, &pattern.variable, params)? {
         let by_id = engine
@@ -190,10 +279,10 @@ fn find_matches(
             .map_err(|e| InterpretError::TypeMismatch(e.to_string()))?;
         let mut out = Vec::new();
         if let Some(node) = by_id {
-            if pattern_matches_node(pattern, &node)
-                && eval_predicate(where_clause, &pattern.variable, &node, params, engine)?
-            {
-                out.push(node);
+            if pattern_matches_node(pattern, &node) {
+                let mut row = Bindings::new();
+                row.insert(pattern.variable.clone(), Binding::Node(node));
+                out.push(row);
             }
         }
         return Ok(out);
@@ -208,17 +297,123 @@ fn find_matches(
         if !pattern_matches_node(pattern, &node) {
             continue;
         }
-        if !eval_predicate(where_clause, &pattern.variable, &node, params, engine)? {
+        let mut row = Bindings::new();
+        row.insert(pattern.variable.clone(), Binding::Node(node));
+        out.push(row);
+    }
+    Ok(out)
+}
+
+/// Walk `(start)-[r1]->(n1)-[r2]->(n2)...` left-to-right, binding the
+/// path's variables along the way.
+fn path_candidates(
+    engine: &mut Engine,
+    start: &NodePattern,
+    chain: &[(EdgePattern, NodePattern)],
+    params: &Params,
+) -> Result<Vec<Bindings>, InterpretError> {
+    let mut rows: Vec<Bindings> = Vec::new();
+    let start_nodes = engine
+        .iter_nodes()
+        .map_err(|e| InterpretError::TypeMismatch(e.to_string()))?;
+    for node in start_nodes {
+        if !pattern_matches_node(start, &node) {
             continue;
         }
-        out.push(node);
-        if let Some(l) = limit {
-            if out.len() as u64 >= l {
-                break;
+        let mut row = Bindings::new();
+        row.insert(start.variable.clone(), Binding::Node(node));
+        rows.push(row);
+    }
+
+    // The "from" variable for hop k is the path's start for k=0 and
+    // the previous hop's target thereafter. Tracked alongside the
+    // chain walk so we don't re-scan the chain per row.
+    let mut prev_var = start.variable.clone();
+    for (edge_pat, target_pat) in chain {
+        let candidate_edges = match &edge_pat.label {
+            Some(label) => engine
+                .iter_edges_by_label(label)
+                .map_err(|e| InterpretError::TypeMismatch(e.to_string()))?,
+            None => engine
+                .iter_edges()
+                .map_err(|e| InterpretError::TypeMismatch(e.to_string()))?,
+        };
+        // Once per hop, not per edge — inline-property literals don't
+        // depend on the bound row.
+        let edge_props = eval_property_map(&edge_pat.properties, params)?;
+
+        let mut next: Vec<Bindings> = Vec::new();
+        for row in &rows {
+            let prev_node = match row.get(&prev_var) {
+                Some(Binding::Node(n)) => n,
+                _ => continue,
+            };
+            for edge in &candidate_edges {
+                if edge.from != prev_node.id {
+                    continue;
+                }
+                if !edge_pattern_matches(edge_pat, edge, &edge_props) {
+                    continue;
+                }
+                let target = match engine
+                    .get_node(&edge.to)
+                    .map_err(|e| InterpretError::TypeMismatch(e.to_string()))?
+                {
+                    Some(n) => n,
+                    None => continue,
+                };
+                if !pattern_matches_node(target_pat, &target) {
+                    continue;
+                }
+                let mut new_row = row.clone();
+                new_row.insert(edge_pat.variable.clone(), Binding::Edge(edge.clone()));
+                new_row.insert(target_pat.variable.clone(), Binding::Node(target));
+                next.push(new_row);
+            }
+        }
+        rows = next;
+        prev_var = target_pat.variable.clone();
+    }
+    Ok(rows)
+}
+
+fn edge_pattern_matches(
+    pattern: &EdgePattern,
+    edge: &Edge,
+    inline_props: &BTreeMap<String, Value>,
+) -> bool {
+    if let Some(label) = &pattern.label {
+        if label != &edge.label {
+            return false;
+        }
+    }
+    for (k, expected) in inline_props {
+        match edge.properties.get(k) {
+            Some(actual) if values_equal(actual, expected) => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Merge two partial binding rows. Shared variables must point at
+/// the same entity (same id) — otherwise returns `None` (the join
+/// fails). Variables present in only one side carry over. Failure
+/// path skips the left-side clone so failed joins are O(shared_vars),
+/// not O(|a|).
+fn unify_bindings(a: &Bindings, b: &Bindings) -> Option<Bindings> {
+    for (k, v) in b {
+        if let Some(existing) = a.get(k) {
+            if existing.id() != v.id() {
+                return None;
             }
         }
     }
-    Ok(out)
+    let mut out = a.clone();
+    for (k, v) in b {
+        out.entry(k.clone()).or_insert_with(|| v.clone());
+    }
+    Some(out)
 }
 
 fn pattern_matches_node(pattern: &NodePattern, node: &Node) -> bool {
@@ -235,19 +430,14 @@ fn extract_id_predicate(
 }
 
 /// Walk an expression looking for a top-level conjunction that
-/// contains an `id(n) = <scalar>` clause. v0.0.2-alpha.5 extends the
-/// id-predicate fast path through `AND` chains (closes PR #1 review
-/// finding 4) — `MATCH (n) WHERE id(n) = $x AND n.foo = 1` now hits
-/// the constant-time index lookup instead of falling back to a full
-/// `iter_nodes()` scan.
-///
-/// The walk is intentionally conservative:
+/// contains an `id(n) = <scalar>` clause. The walk is intentionally
+/// conservative:
 /// - Only top-level `AND` is descended (not `OR` — under disjunction
-///   we'd have to enumerate two id sets, which v0.0.2 doesn't do).
+///   we'd have to enumerate two id sets, which we don't do).
 /// - Only one id() match is honoured per query (the first match wins);
 ///   `id(n) = $x AND id(n) = $y` is therefore equivalent to using the
-///   first scalar (which is fine — the second predicate is then
-///   re-checked in `eval_predicate` and filters out a non-match).
+///   first scalar (the second predicate is re-checked in
+///   `eval_predicate` and filters out a non-match).
 fn extract_id_in_expr(
     expr: &Expr,
     variable: &str,
@@ -286,7 +476,8 @@ fn extract_id_in_expr(
 }
 
 /// Evaluate an expression that does not depend on a bound variable
-/// (used by the id-predicate fast path).
+/// (used by the id-predicate fast path and by inline edge-pattern
+/// property evaluation).
 fn eval_const(expr: &Expr, params: &Params) -> Result<Value, InterpretError> {
     match expr {
         Expr::Literal(v) => Ok(v.clone()),
@@ -295,20 +486,19 @@ fn eval_const(expr: &Expr, params: &Params) -> Result<Value, InterpretError> {
             .cloned()
             .ok_or_else(|| InterpretError::UnknownParam(name.clone())),
         _ => Err(InterpretError::ExpectedScalar(
-            "non-constant in id() comparison",
+            "non-constant in constant context",
         )),
     }
 }
 
 fn eval_predicate(
     expr: Option<&Expr>,
-    variable: &str,
-    node: &Node,
+    bindings: &Bindings,
     params: &Params,
     engine: &Engine,
 ) -> Result<bool, InterpretError> {
     let Some(expr) = expr else { return Ok(true) };
-    let v = eval_expr(expr, variable, node, params, engine)?;
+    let v = eval_expr(expr, bindings, params, engine)?;
     match v {
         Value::Bool(b) => Ok(b),
         Value::Null => Ok(false),
@@ -318,8 +508,7 @@ fn eval_predicate(
 
 fn eval_expr(
     expr: &Expr,
-    variable: &str,
-    node: &Node,
+    bindings: &Bindings,
     params: &Params,
     engine: &Engine,
 ) -> Result<Value, InterpretError> {
@@ -329,14 +518,17 @@ fn eval_expr(
             .get(name)
             .cloned()
             .ok_or_else(|| InterpretError::UnknownParam(name.clone())),
-        Expr::IdOf(v) if v == variable => Ok(Value::String(node.id.clone())),
-        Expr::IdOf(other) => Err(InterpretError::UnknownVariable(other.clone())),
-        Expr::Property { variable: v, path } if v == variable => {
-            resolve_property_path(node, path, engine)
-        }
-        Expr::Property { variable: v, .. } => Err(InterpretError::UnknownVariable(v.clone())),
+        Expr::IdOf(v) => match bindings.get(v) {
+            Some(b) => Ok(Value::String(b.id().to_owned())),
+            None => Err(InterpretError::UnknownVariable(v.clone())),
+        },
+        Expr::Property { variable, path } => match bindings.get(variable) {
+            Some(Binding::Node(n)) => resolve_node_property_path(n, path, engine),
+            Some(Binding::Edge(e)) => resolve_edge_property_path(e, path),
+            None => Err(InterpretError::UnknownVariable(variable.clone())),
+        },
         Expr::Not(inner) => {
-            let v = eval_expr(inner, variable, node, params, engine)?;
+            let v = eval_expr(inner, bindings, params, engine)?;
             match v {
                 Value::Bool(b) => Ok(Value::Bool(!b)),
                 Value::Null => Ok(Value::Null),
@@ -344,8 +536,8 @@ fn eval_expr(
             }
         }
         Expr::Binary { op, lhs, rhs } => {
-            let l = eval_expr(lhs, variable, node, params, engine)?;
-            let r = eval_expr(rhs, variable, node, params, engine)?;
+            let l = eval_expr(lhs, bindings, params, engine)?;
+            let r = eval_expr(rhs, bindings, params, engine)?;
             apply_binop(*op, l, r)
         }
     }
@@ -355,8 +547,8 @@ fn eval_expr(
 /// hit the node's user properties; `_motif.<rest>` paths hit the
 /// metadata-as-data namespace (engine state). Arbitrary-depth paths
 /// are allowed only inside the `_motif` namespace; user-property
-/// nesting (`n.address.city`) is a v0.0.3+ shape.
-fn resolve_property_path(
+/// nesting (`n.address.city`) is a v0.0.5+ shape.
+fn resolve_node_property_path(
     node: &Node,
     path: &[String],
     engine: &Engine,
@@ -364,6 +556,17 @@ fn resolve_property_path(
     match path {
         [key] => Ok(node.properties.get(key).cloned().unwrap_or(Value::Null)),
         [namespace, rest @ ..] if namespace == "_motif" => Ok(motif_metadata(node, rest, engine)),
+        _ => Err(InterpretError::NestedPath(path.join("."))),
+    }
+}
+
+/// Resolve a property path against a bound edge. Edges don't (yet)
+/// participate in the `_motif` namespace — the foreshadow flag is
+/// engine-wide and reachable via the node-bound path; future alphas
+/// may expose `r._motif.X` if a use case appears.
+fn resolve_edge_property_path(edge: &Edge, path: &[String]) -> Result<Value, InterpretError> {
+    match path {
+        [key] => Ok(edge.properties.get(key).cloned().unwrap_or(Value::Null)),
         _ => Err(InterpretError::NestedPath(path.join("."))),
     }
 }
@@ -452,17 +655,22 @@ fn compare(op: BinOp, l: &Value, r: &Value) -> Result<Value, InterpretError> {
 
 fn project(
     item: &ReturnItem,
-    var: &str,
-    node: &Node,
+    bindings: &Bindings,
     engine: &Engine,
 ) -> Result<ResultCell, InterpretError> {
     match item {
-        ReturnItem::Variable(v) if v == var => Ok(ResultCell::Node(node.clone())),
-        ReturnItem::Variable(v) => Err(InterpretError::UnknownVariable(v.clone())),
-        ReturnItem::Property { variable: v, path } if v == var => Ok(ResultCell::Value(
-            resolve_property_path(node, path, engine)?,
-        )),
-        ReturnItem::Property { variable: v, .. } => Err(InterpretError::UnknownVariable(v.clone())),
+        ReturnItem::Variable(v) => match bindings.get(v) {
+            Some(Binding::Node(n)) => Ok(ResultCell::Node(n.clone())),
+            Some(Binding::Edge(e)) => Ok(ResultCell::Edge(e.clone())),
+            None => Err(InterpretError::UnknownVariable(v.clone())),
+        },
+        ReturnItem::Property { variable, path } => match bindings.get(variable) {
+            Some(Binding::Node(n)) => Ok(ResultCell::Value(resolve_node_property_path(
+                n, path, engine,
+            )?)),
+            Some(Binding::Edge(e)) => Ok(ResultCell::Value(resolve_edge_property_path(e, path)?)),
+            None => Err(InterpretError::UnknownVariable(variable.clone())),
+        },
     }
 }
 

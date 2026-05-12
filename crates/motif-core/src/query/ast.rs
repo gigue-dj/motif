@@ -1,9 +1,9 @@
 //! Abstract syntax tree for the Cypher subset.
 //!
-//! Intentionally minimal: a single bound variable per query,
-//! single-pattern `MATCH`, `CREATE` / `MERGE` for nodes only, and a flat
-//! expression tree for `WHERE`. v0.0.2-alpha.1 added multi-dot property
-//! paths to support metadata-as-data namespaces (`n._motif.foreshadow`).
+//! v0.0.4-alpha.2 added directed relationship patterns (`(a)-[r]->(b)`)
+//! and multi-pattern `MATCH p1, p2, ...`. `Statement::MatchReturn` and
+//! `Statement::MatchDelete` now carry a `Vec<Pattern>`; each `Pattern`
+//! is either a bare node or a path (node + chain of edge→node).
 
 use std::collections::BTreeMap;
 
@@ -11,31 +11,60 @@ use crate::value::Value;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
-    /// `CREATE (n:Label {props})` — node only in v0.0.1.
+    /// `CREATE (n:Label {props})` — node only.
     Create { pattern: NodePattern },
     /// `MERGE (n:Label {id: $id, ...})` — must include an `id` property
     /// so the engine can look the node up. No-op on hit, insert on miss.
     Merge { pattern: NodePattern },
-    /// `MATCH (n[:Label]) [WHERE expr] RETURN ... [LIMIT n]`
+    /// `MATCH p1[, p2, ...] [WHERE expr] RETURN ... [LIMIT n]`
     MatchReturn {
-        pattern: NodePattern,
+        patterns: Vec<Pattern>,
         where_clause: Option<Expr>,
         return_items: Vec<ReturnItem>,
         limit: Option<u64>,
     },
-    /// `MATCH (n[:Label]) [WHERE expr] DELETE n`
+    /// `MATCH p1[, p2, ...] [WHERE expr] DELETE var`
     MatchDelete {
-        pattern: NodePattern,
+        patterns: Vec<Pattern>,
         where_clause: Option<Expr>,
         variable: String,
     },
 }
 
-/// `(variable[:Label][{props}])`. v0.0.1 requires the variable; the label
-/// and properties are optional (used by `CREATE`/`MERGE`; `MATCH` ignores
-/// the property block — predicates go in `WHERE`).
+/// A `MATCH` clause is a comma-separated list of `Pattern`s. Each is
+/// either a bare node `(n)` or a path `(a)-[r]->(b)[-[s]->(c)...]`.
+/// Variables shared between patterns enforce equality constraints
+/// during interpretation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Pattern {
+    Node(NodePattern),
+    Path {
+        start: NodePattern,
+        /// Successive `(edge, target_node)` pairs after `start`.
+        /// `(a)-[r]->(b)-[s]->(c)` → start=a, chain=[(r,b),(s,c)].
+        chain: Vec<(EdgePattern, NodePattern)>,
+    },
+}
+
+/// `(variable[:Label][{props}])`. The variable is required; label and
+/// properties are optional. `CREATE`/`MERGE` use the property block;
+/// `MATCH` ignores it on `NodePattern` (predicates go in `WHERE`),
+/// but the inline-property shorthand on `EdgePattern` IS honored by
+/// `MATCH` — see `EdgePattern::properties`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodePattern {
+    pub variable: String,
+    pub label: Option<String>,
+    pub properties: BTreeMap<String, Expr>,
+}
+
+/// `-[variable[:Label][{props}]]->`. v0.0.4-alpha.2 ships the
+/// directed-right form only; inverse / undirected patterns are
+/// post-alpha.2 work and will reintroduce a direction discriminant
+/// when they need it. Inline properties are honored by `MATCH` as
+/// equality predicates (one fewer `WHERE` clause for the common case).
+#[derive(Debug, Clone, PartialEq)]
+pub struct EdgePattern {
     pub variable: String,
     pub label: Option<String>,
     pub properties: BTreeMap<String, Expr>,
