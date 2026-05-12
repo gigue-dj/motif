@@ -21,7 +21,7 @@
 //! for both mutation and read operations because the underlying
 //! [`Storage`] seeks the file cursor on `read_at`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::config::{CapabilityConfig, EdgeConfig, MotifConfig};
@@ -58,12 +58,6 @@ pub enum EngineError {
     ControllerKindMismatch { declared: String, wired: String },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind {
-    Node,
-    Edge,
-}
-
 #[derive(Debug, Clone, Copy)]
 struct IndexEntry {
     /// Byte offset of the framed Mutation in the underlying storage.
@@ -71,9 +65,6 @@ struct IndexEntry {
     /// Length of the bincoded Mutation payload (excluding the 4-byte
     /// length prefix).
     payload_len: u32,
-    /// Whether this id targets a node or an edge. Disambiguates the
-    /// id-shared map.
-    kind: Kind,
     /// Whether the latest mutation that produced this index entry is
     /// still foreshadow=true. Updated on every commit; flipped by the
     /// (alpha.2) controller-confirm flow.
@@ -82,9 +73,14 @@ struct IndexEntry {
 
 pub struct Engine {
     storage: Box<dyn Storage>,
-    /// Maps user-provided id → on-disk record location + foreshadow.
-    /// Globally unique id space across nodes and edges.
-    index: HashMap<String, IndexEntry>,
+    /// Node id → on-disk record. Independent namespace from
+    /// `edge_index`: the same string can name a node and an edge.
+    node_index: HashMap<String, IndexEntry>,
+    /// Edge id → on-disk record. Independent of `node_index`.
+    edge_index: HashMap<String, IndexEntry>,
+    /// Edge label → ids. Empty buckets are dropped so the map's size
+    /// tracks live labels, not every label ever seen.
+    edge_by_label: HashMap<String, HashSet<String>>,
     /// Per-instance actor identity copied from `MotifConfig::identity`.
     /// Stamped onto every [`Mutation`] produced by this engine.
     actor: ActorId,
@@ -164,7 +160,9 @@ impl Engine {
 
         let mut engine = Self {
             storage,
-            index: HashMap::new(),
+            node_index: HashMap::new(),
+            edge_index: HashMap::new(),
+            edge_by_label: HashMap::new(),
             actor: ActorId {
                 user_id: config.identity.user_id.clone(),
                 device_id: config.identity.device_id.clone(),
@@ -319,7 +317,7 @@ impl Engine {
             match decode_framed(&frame) {
                 Ok(Some((mutation, consumed))) => {
                     debug_assert_eq!(consumed, total_record);
-                    self.apply_recovered(&mutation, cursor, payload_len);
+                    self.apply_recovered(&mutation, cursor, payload_len)?;
                     if mutation.local_seq >= self.next_local_seq {
                         self.next_local_seq = mutation.local_seq + 1;
                     }
@@ -342,44 +340,105 @@ impl Engine {
         Ok(())
     }
 
-    /// Apply a Mutation we just decoded during recovery. Inserts /
-    /// deletes touch the id index; `SchemaApply` updates the engine's
-    /// current schema. Each path is idempotent under replay.
-    fn apply_recovered(&mut self, m: &Mutation, offset: u64, payload_len: u32) {
-        match &m.op {
+    /// Idempotent index-update for a decoded mutation, shared by the
+    /// recovery path (replays the on-disk log into the index) and the
+    /// commit path (publishes a just-appended mutation). Keeping both
+    /// callers on one helper guarantees recovery and live commits
+    /// maintain the same set of indexes; alpha.2's edge property
+    /// index lands here too.
+    fn update_indexes_for(
+        &mut self,
+        op: &MutationOp,
+        offset: u64,
+        payload_len: u32,
+        foreshadow: bool,
+    ) -> Result<(), EngineError> {
+        match op {
             MutationOp::NodeInsert(n) => {
-                self.index.insert(
+                self.node_index.insert(
                     n.id.clone(),
                     IndexEntry {
                         offset,
                         payload_len,
-                        kind: Kind::Node,
-                        foreshadow: m.foreshadow,
+                        foreshadow,
                     },
                 );
             }
             MutationOp::EdgeInsert(e) => {
-                self.index.insert(
+                self.edge_index.insert(
                     e.id.clone(),
                     IndexEntry {
                         offset,
                         payload_len,
-                        kind: Kind::Edge,
-                        foreshadow: m.foreshadow,
+                        foreshadow,
                     },
                 );
+                self.edge_by_label
+                    .entry(e.label.clone())
+                    .or_default()
+                    .insert(e.id.clone());
             }
-            MutationOp::NodeDelete(id) | MutationOp::EdgeDelete(id) => {
-                self.index.remove(id);
+            MutationOp::NodeDelete(id) => {
+                self.node_index.remove(id);
+            }
+            MutationOp::EdgeDelete(id) => {
+                if let Some(entry) = self.edge_index.remove(id) {
+                    self.remove_from_edge_label_index(id, entry)?;
+                }
             }
             MutationOp::SchemaApply(s) => {
                 self.current_schema = Some(s.clone());
             }
         }
+        Ok(())
+    }
+
+    fn apply_recovered(
+        &mut self,
+        m: &Mutation,
+        offset: u64,
+        payload_len: u32,
+    ) -> Result<(), EngineError> {
+        self.update_indexes_for(&m.op, offset, payload_len, m.foreshadow)
+    }
+
+    /// Drop `id` from its `edge_by_label` bucket; remove the bucket
+    /// key if it goes empty, so map size tracks live labels rather
+    /// than every label ever seen. Reads the edge's label off disk —
+    /// keeps `IndexEntry` minimal (16 B, shared with `node_index`) at
+    /// the cost of one indexed read per edge delete. Bulk-delete
+    /// compaction (v0.0.6) revisits this if the read cost bites.
+    fn remove_from_edge_label_index(
+        &mut self,
+        id: &str,
+        entry: IndexEntry,
+    ) -> Result<(), EngineError> {
+        let op = self.read_op_at(&entry)?;
+        let Some(MutationOp::EdgeInsert(e)) = op else {
+            // Recovered op shape disagrees with the index entry's
+            // kind — that's a corruption / desync state, not a
+            // routine miss. Surface it instead of silently leaking
+            // the bucket entry.
+            return Err(EngineError::Recovery {
+                offset: entry.offset,
+                source: crate::record::RecordError::Decode(
+                    bincode::error::DecodeError::Other(
+                        "edge_index entry did not decode to an EdgeInsert",
+                    ),
+                ),
+            });
+        };
+        if let Some(bucket) = self.edge_by_label.get_mut(&e.label) {
+            bucket.remove(id);
+            if bucket.is_empty() {
+                self.edge_by_label.remove(&e.label);
+            }
+        }
+        Ok(())
     }
 
     pub fn insert_node(&mut self, node: Node) -> Result<(), EngineError> {
-        if self.index.contains_key(&node.id) {
+        if self.node_index.contains_key(&node.id) {
             return Err(EngineError::DuplicateId(node.id));
         }
         self.validate_label(&node.label)?;
@@ -387,7 +446,7 @@ impl Engine {
     }
 
     pub fn insert_edge(&mut self, edge: Edge) -> Result<(), EngineError> {
-        if self.index.contains_key(&edge.id) {
+        if self.edge_index.contains_key(&edge.id) {
             return Err(EngineError::DuplicateId(edge.id));
         }
         if !self.has_node(&edge.from) {
@@ -477,39 +536,7 @@ impl Engine {
         let frame = encode_framed(&m)?;
         let payload_len = (frame.len() - LEN_PREFIX_BYTES) as u32;
         let offset = self.storage.append(&frame)?;
-
-        // Update in-memory state from the same Mutation we just
-        // persisted, so on-disk state and in-memory state agree.
-        match &m.op {
-            MutationOp::NodeInsert(n) => {
-                self.index.insert(
-                    n.id.clone(),
-                    IndexEntry {
-                        offset,
-                        payload_len,
-                        kind: Kind::Node,
-                        foreshadow: m.foreshadow,
-                    },
-                );
-            }
-            MutationOp::EdgeInsert(e) => {
-                self.index.insert(
-                    e.id.clone(),
-                    IndexEntry {
-                        offset,
-                        payload_len,
-                        kind: Kind::Edge,
-                        foreshadow: m.foreshadow,
-                    },
-                );
-            }
-            MutationOp::NodeDelete(id) | MutationOp::EdgeDelete(id) => {
-                self.index.remove(id);
-            }
-            MutationOp::SchemaApply(s) => {
-                self.current_schema = Some(s.clone());
-            }
-        }
+        self.update_indexes_for(&m.op, offset, payload_len, m.foreshadow)?;
 
         // Tee to the in-memory MutationLog for the (alpha.2) controller
         // worker. No-op when no log is wired.
@@ -519,19 +546,10 @@ impl Engine {
         Ok(())
     }
 
-    /// Materialize all live nodes. v0.0.1 / v0.0.2-alpha.1 do an O(N)
-    /// scan because the only secondary index is the id map. Acceptable
-    /// up to alpha-era graph sizes; a label / property index is later
-    /// work.
     pub fn iter_nodes(&mut self) -> Result<Vec<Node>, EngineError> {
-        let entries: Vec<(String, IndexEntry)> = self
-            .index
-            .iter()
-            .filter(|(_, e)| e.kind == Kind::Node)
-            .map(|(k, v)| (k.clone(), *v))
-            .collect();
+        let entries: Vec<IndexEntry> = self.node_index.values().copied().collect();
         let mut out = Vec::with_capacity(entries.len());
-        for (_, entry) in entries {
+        for entry in entries {
             if let Some(MutationOp::NodeInsert(n)) = self.read_op_at(&entry)? {
                 out.push(n);
             }
@@ -540,14 +558,29 @@ impl Engine {
     }
 
     pub fn iter_edges(&mut self) -> Result<Vec<Edge>, EngineError> {
-        let entries: Vec<(String, IndexEntry)> = self
-            .index
-            .iter()
-            .filter(|(_, e)| e.kind == Kind::Edge)
-            .map(|(k, v)| (k.clone(), *v))
-            .collect();
+        let entries: Vec<IndexEntry> = self.edge_index.values().copied().collect();
         let mut out = Vec::with_capacity(entries.len());
-        for (_, entry) in entries {
+        for entry in entries {
+            if let Some(MutationOp::EdgeInsert(e)) = self.read_op_at(&entry)? {
+                out.push(e);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Materialize all live edges with `label`. O(N_label) via
+    /// `edge_by_label` + one storage read per match. Empty Vec for
+    /// labels with no live edges.
+    pub fn iter_edges_by_label(&mut self, label: &str) -> Result<Vec<Edge>, EngineError> {
+        let ids: Vec<String> = match self.edge_by_label.get(label) {
+            Some(set) => set.iter().cloned().collect(),
+            None => return Ok(Vec::new()),
+        };
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            let Some(entry) = self.edge_index.get(&id).copied() else {
+                continue;
+            };
             if let Some(MutationOp::EdgeInsert(e)) = self.read_op_at(&entry)? {
                 out.push(e);
             }
@@ -556,12 +589,9 @@ impl Engine {
     }
 
     pub fn get_node(&mut self, id: &str) -> Result<Option<Node>, EngineError> {
-        let Some(entry) = self.index.get(id).copied() else {
+        let Some(entry) = self.node_index.get(id).copied() else {
             return Ok(None);
         };
-        if entry.kind != Kind::Node {
-            return Ok(None);
-        }
         Ok(self.read_op_at(&entry)?.and_then(|op| match op {
             MutationOp::NodeInsert(n) => Some(n),
             _ => None,
@@ -569,12 +599,9 @@ impl Engine {
     }
 
     pub fn get_edge(&mut self, id: &str) -> Result<Option<Edge>, EngineError> {
-        let Some(entry) = self.index.get(id).copied() else {
+        let Some(entry) = self.edge_index.get(id).copied() else {
             return Ok(None);
         };
-        if entry.kind != Kind::Edge {
-            return Ok(None);
-        }
         Ok(self.read_op_at(&entry)?.and_then(|op| match op {
             MutationOp::EdgeInsert(e) => Some(e),
             _ => None,
@@ -594,20 +621,29 @@ impl Engine {
     }
 
     pub fn has_node(&self, id: &str) -> bool {
-        matches!(self.index.get(id), Some(e) if e.kind == Kind::Node)
+        self.node_index.contains_key(id)
     }
 
     pub fn has_edge(&self, id: &str) -> bool {
-        matches!(self.index.get(id), Some(e) if e.kind == Kind::Edge)
+        self.edge_index.contains_key(id)
     }
 
     /// True iff the latest mutation targeting `id` is still
-    /// foreshadow=true. Returns `false` for unknown ids.
+    /// foreshadow=true. Returns `false` for unknown ids. When `id`
+    /// names both a node and an edge (legal post-namespace-split),
+    /// the node's flag wins — typed callers should use
+    /// `get_node` / `get_edge` directly to disambiguate.
     ///
     /// Exposed via the `_motif.foreshadow` Cypher metadata namespace
     /// per MOTIF.md decision 19 (metadata-as-data).
     pub fn is_foreshadow(&self, id: &str) -> bool {
-        self.index.get(id).map(|e| e.foreshadow).unwrap_or(false)
+        if let Some(entry) = self.node_index.get(id) {
+            return entry.foreshadow;
+        }
+        self.edge_index
+            .get(id)
+            .map(|e| e.foreshadow)
+            .unwrap_or(false)
     }
 
     /// Re-feed every foreshadow=true mutation from the persisted log
@@ -660,11 +696,11 @@ impl Engine {
     }
 
     pub fn node_count(&self) -> usize {
-        self.index.values().filter(|e| e.kind == Kind::Node).count()
+        self.node_index.len()
     }
 
     pub fn edge_count(&self) -> usize {
-        self.index.values().filter(|e| e.kind == Kind::Edge).count()
+        self.edge_index.len()
     }
 
     /// Execute a Cypher-subset query. See `query` module docs for the
