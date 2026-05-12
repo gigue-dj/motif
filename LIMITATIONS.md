@@ -130,6 +130,17 @@ pass can grep its way to the source.
 > (real bridge needed to validate any of these). `hoverphone` test
 > profile — carry forward to v0.0.6 (the "Scale and operate"
 > milestone) per the long-run strategy.
+>
+> **v0.0.4-alpha.1 added:** id-namespace split — `Engine.index`
+> becomes `node_index` + `edge_index` (independent
+> `HashMap<String, IndexEntry>` each); a node and an edge can share
+> the same id without colliding. New `edge_by_label`
+> `HashMap<String, HashSet<String>>` index + `iter_edges_by_label`
+> API; lays the storage scale foundation for the alpha.2 Cypher
+> edge surface. Edge property index defers to alpha.2 (alongside
+> the `MATCH ()-[r:LABEL {prop: x}]->()` syntax that motivates it).
+> Node label / property indexes stay deferred (10k node ceiling
+> per the gigue B2B target keeps O(N_nodes) cheap).
 
 ---
 
@@ -264,14 +275,15 @@ pass can grep its way to the source.
   or whatever else they have access to. Concrete reference impls are
   host territory (per the v0.0.3 plan).
   *Source:* `crates/motif-wasm/src/host_storage.rs`.
-- `[scope]` **Single-namespace ID index.** Nodes and edges share
-  `HashMap<String, IndexEntry>`. Globally unique ids today.
-  Namespace split (separate node and edge maps) graduates to v0.0.4
-  alongside the edge-index work — gigue's B2B target (1M+ edges)
-  makes the shared map a real cost, not a "trivial split if it
-  bites".
-  *Source:* `crates/motif-core/src/engine.rs:55-61`;
-  `MOTIF.md` v0.0.4 milestone.
+- ~~`[scope]` Single-namespace ID index~~ — **closed in
+  v0.0.4-alpha.1.** `Engine` now holds `node_index` and `edge_index`
+  as independent `HashMap<String, IndexEntry>` maps. A node and an
+  edge can share the same id without colliding; typed accessors
+  (`get_node` / `get_edge`) keep the namespaces unambiguous. The
+  split changes index shape only — record cardinality is unchanged
+  (N nodes + M edges still = N + M entries).
+  *Source:* `crates/motif-core/src/engine.rs`;
+  `crates/motif-core/tests/namespace_split.rs`.
 - `[debt]` **No referential integrity on node delete.** Deleting a
   node that has incoming/outgoing edges leaves them dangling; the
   query layer treats them as unreachable. `DETACH DELETE` /
@@ -279,14 +291,15 @@ pass can grep its way to the source.
   growth.
   *Source:* `crates/motif-core/src/engine.rs:200-211`;
   `MOTIF.md` v0.0.4 milestone.
-- `[perf]` **`iter_nodes` / `iter_edges` are O(N) reads.** The id
-  index is the only secondary index in v0.0.2; any MATCH without an
-  `id()` predicate scans every record. Acceptable through v0.0.3
-  ("real device" North Star doesn't grow the graph); **graduates to
-  v0.0.4 North-Star tier** because the gigue B2B target (100k–1M+
-  edges) makes O(N) edge scans non-negotiable. Edge label + property
-  indexes ship with the Cypher surface growth.
-  *Source:* `crates/motif-core/src/engine.rs:225-264`;
+- `[perf]` **`iter_nodes` / `iter_edges` are O(N) reads.**
+  v0.0.4-alpha.1 added `iter_edges_by_label(&str)` backed by the new
+  `edge_by_label` index — `MATCH ()-[r:LABEL]->()` (lands in alpha.2)
+  is O(matches) rather than O(N_total_edges). The unfiltered
+  `iter_edges` / `iter_nodes` still walk every entry in their
+  namespace; edge property index lands in alpha.2 alongside the
+  Cypher edge surface that drives it; node label / property indexes
+  stay deferred (10k node ceiling makes O(N_nodes) cheap).
+  *Source:* `crates/motif-core/src/engine.rs` (`iter_edges_by_label`);
   `MOTIF.md` v0.0.4 milestone.
 - `[debt]` **Property values are limited to 5 scalar variants.**
   `Null`, `Bool`, `I64`, `F64`, `String`. No timestamps, no blobs, no

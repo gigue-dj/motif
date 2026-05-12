@@ -77,7 +77,7 @@ indexes row below reflects current state vs target state.
 
 | Kuzu | Motif | Why |
 |---|---|---|
-| Hash index, vector index, full-text search, sparse-row CSR adjacency for joins. | **Through v0.0.3:** one id index (`HashMap<String, IndexEntry>`) shared across nodes and edges. **v0.0.4 splits node and edge namespaces and adds label + property indexes for both.** Vector / FTS / specialised joins remain explicit `[scope]` cuts. | The shared map is fine for the v0.0.2 by-id hot path; the gigue B2B target (100k–1M+ edges) makes O(N) edge scans non-negotiable, so the v0.0.4 milestone graduates real edge indexes alongside the Cypher surface growth. Vector / FTS stay bridge concerns — controller bridges that need them route the relevant queries upstream. |
+| Hash index, vector index, full-text search, sparse-row CSR adjacency for joins. | **Through v0.0.3:** one id index (`HashMap<String, IndexEntry>`) shared across nodes and edges. **v0.0.4-alpha.1:** node and edge namespaces split into independent maps; `edge_by_label` index + `iter_edges_by_label` API land. **Edge property index** is alpha.2 work (alongside the Cypher edge surface that drives it). **Node label / property indexes** stay deferred (10k node ceiling per the gigue B2B target keeps O(N_nodes) cheap). Vector / FTS / specialised joins remain explicit `[scope]` cuts. | The shared map was fine for the v0.0.2 by-id hot path; the gigue B2B target (100k–1M+ edges) makes O(N) edge scans non-negotiable, so the v0.0.4 milestone graduates real edge indexes alongside the Cypher surface growth. Vector / FTS stay bridge concerns — controller bridges that need them route the relevant queries upstream. |
 
 ### Type system
 
