@@ -2,16 +2,18 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::graph::Node;
+use crate::graph::{Edge, Node};
 use crate::value::Value;
 
-/// A single cell in a result row. `RETURN n` produces a `Node`; `RETURN
-/// n.prop` produces a `Value`.
+/// A single cell in a result row. `RETURN n` produces a `Node`,
+/// `RETURN r` (where `r` is bound by an edge pattern) produces an
+/// `Edge`, and `RETURN n.prop` / `RETURN r.prop` produce a `Value`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ResultCell {
     Value(Value),
     Node(Node),
+    Edge(Edge),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

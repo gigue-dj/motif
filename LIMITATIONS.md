@@ -141,6 +141,20 @@ pass can grep its way to the source.
 > the `MATCH ()-[r:LABEL {prop: x}]->()` syntax that motivates it).
 > Node label / property indexes stay deferred (10k node ceiling
 > per the gigue B2B target keeps O(N_nodes) cheap).
+>
+> **v0.0.4-alpha.2 added:** Cypher edge surface —
+> `MATCH (a)-[r]->(b)`, `MATCH (a)-[r:LABEL]->(b)`,
+> `MATCH (a)-[r:LABEL {prop: v}]->(b)`, multi-hop
+> `(a)-[r]->(b)-[s]->(c)`, multi-pattern `MATCH p1, p2`. Label
+> predicate hits the alpha.1 `edge_by_label` index; inline-property
+> predicates filter via bucket-scan over the label set (no edge
+> property index yet — deferred per the same engineering principle
+> as the alpha.1 deferrals: ship the syntax with measurable
+> behaviour, add the index when a benchmark shows it bites).
+> New `ResultCell::Edge` variant. New lexer tokens (`LBracket`,
+> `RBracket`, `Arrow`, `Dash`) with `-`-vs-`->`-vs-negative-literal
+> disambiguation. `Statement::MatchReturn` + `MatchDelete` now
+> carry `Vec<Pattern>` instead of a single `NodePattern`.
 
 ---
 
@@ -333,13 +347,52 @@ pass can grep its way to the source.
   `OPTIONAL MATCH`.
   *Source:* `crates/motif-core/src/query/mod.rs:30-44`,
   `crates/motif-core/src/query/ast.rs:5-7`.
-- `[gap]` **Edges aren't queryable from Cypher.** Engine API exposes
-  `insert_edge` / `get_edge` / `iter_edges`, but Cypher queries can
-  only target nodes through v0.0.2. Edge queries (`MATCH (a)-[r]->(b)`)
-  + multi-pattern `MATCH` ship in v0.0.4 ("Real Cypher queries at
-  scale") alongside the edge-index work.
-  *Source:* `crates/motif-core/src/query/mod.rs:33-35`;
-  `MOTIF.md` v0.0.4 milestone.
+- ~~`[gap]` Edges aren't queryable from Cypher~~ — **closed in
+  v0.0.4-alpha.2.** `MATCH (a)-[r]->(b)` parses + interprets; label
+  predicates (`-[r:LABEL]->`) hit the `edge_by_label` index;
+  inline-property predicates (`-[r:LABEL {prop: v}]->`) filter via
+  bucket-scan over that label set. Multi-hop paths
+  (`(a)-[r]->(b)-[s]->(c)`) and comma-separated multi-pattern
+  `MATCH p1, p2` work (shared variables unify on id). `RETURN` of an
+  edge variable produces a `ResultCell::Edge`; `RETURN r.prop`
+  resolves the edge's properties.
+  *Source:* `crates/motif-core/src/query/{ast,parser,interpreter}.rs`;
+  `crates/motif-core/tests/edge_match.rs`.
+- `[perf]` **Inline edge-property predicates are bucket-scan, not
+  indexed.** v0.0.4-alpha.2 evaluates `-[r:LABEL {prop: v}]->` by
+  walking the `edge_by_label` bucket for `LABEL` and filtering each
+  edge's properties in memory. For labels with few edges (most B2B
+  graphs are well-distributed across labels), this is sub-millisecond
+  even at 1M edges total. A dedicated `edge_by_property` index lands
+  if a benchmark shows a single label bucket dominates the workload
+  — preempting it now would cost ~24 B × N_edges × avg-props in RAM
+  for a use case nobody has yet measured.
+  *Source:* `crates/motif-core/src/query/interpreter.rs`
+  (`path_candidates`, `edge_pattern_matches`); `MOTIF.md` v0.0.4
+  milestone.
+- `[perf]` **`path_candidates` does a linear `edge.from` scan per
+  row per hop.** v0.0.4-alpha.2's interpreter materializes
+  `iter_edges_by_label(label)` once per hop and then walks the
+  entire bucket per binding row to find edges whose `from` matches
+  the previous node. At 100k+ edges in a popular label and many
+  rows, this is the dominant cost — flagged by alpha.2's simplify-
+  skill efficiency review as the headline perf gap. A
+  `(from, label) → Vec<edge_id>` adjacency index (or a per-hop
+  `from`-keyed grouping of the bucket) collapses it to O(degree).
+  Close before the alpha.4 perf benchmark vs upstream Kuzu.
+  *Source:* `crates/motif-core/src/query/interpreter.rs`
+  (`path_candidates` inner loop).
+- `[perf]` **`find_match_rows` builds the full cartesian product
+  before applying WHERE / LIMIT.** Multi-pattern `MATCH` with no
+  shared variables produces |p1| × |p2| × … rows in memory before
+  the predicate filter runs. WHERE-clause subexpressions that touch
+  only one pattern's variables aren't pushed down; LIMIT isn't
+  applied inline. Predicate push-down + per-pattern LIMIT are
+  alpha.3+ work — for now, hosts that issue unbounded multi-pattern
+  joins on large datasets are encouraged to add `id()` predicates
+  or label filters that narrow each pattern's candidate set first.
+  *Source:* `crates/motif-core/src/query/interpreter.rs`
+  (`find_match_rows`).
 - `[scope]` **`MERGE` is no-op-on-hit, not full upsert.** Existing
   nodes are not updated; only missing nodes are inserted. Real upsert
   is post-v0.0.1 once the controller decides what "update" means.

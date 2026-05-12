@@ -35,9 +35,18 @@ pub enum Token {
     RParen,
     LBrace,
     RBrace,
+    LBracket,
+    RBracket,
     Comma,
     Colon,
     Dot,
+    /// `->` — directed relationship arrow.
+    Arrow,
+    /// `-` — relationship-pattern connector. Standalone `-` is only
+    /// produced when the lexer disambiguates it from a negative number
+    /// literal (`-` followed by a digit becomes part of the literal)
+    /// and from `->` (`-` followed by `>` becomes [`Token::Arrow`]).
+    Dash,
     Eq,
     NotEq,
     Lt,
@@ -71,9 +80,13 @@ impl fmt::Display for Token {
             Token::RParen => write!(f, ")"),
             Token::LBrace => write!(f, "{{"),
             Token::RBrace => write!(f, "}}"),
+            Token::LBracket => write!(f, "["),
+            Token::RBracket => write!(f, "]"),
             Token::Comma => write!(f, ","),
             Token::Colon => write!(f, ":"),
             Token::Dot => write!(f, "."),
+            Token::Arrow => write!(f, "->"),
+            Token::Dash => write!(f, "-"),
             Token::Eq => write!(f, "="),
             Token::NotEq => write!(f, "!="),
             Token::Lt => write!(f, "<"),
@@ -142,6 +155,20 @@ pub fn lex(input: &str) -> Result<Vec<Spanned>, LexError> {
             '}' => {
                 out.push(Spanned {
                     token: Token::RBrace,
+                    offset: start,
+                });
+                i += 1;
+            }
+            '[' => {
+                out.push(Spanned {
+                    token: Token::LBracket,
+                    offset: start,
+                });
+                i += 1;
+            }
+            ']' => {
+                out.push(Spanned {
+                    token: Token::RBracket,
                     offset: start,
                 });
                 i += 1;
@@ -248,7 +275,34 @@ pub fn lex(input: &str) -> Result<Vec<Spanned>, LexError> {
                     offset: start,
                 });
             }
-            '-' | '0'..='9' => {
+            '-' => {
+                // Three meanings depending on lookahead:
+                //   `->`  → Arrow (relationship direction)
+                //   `-<digit>` → part of a negative integer / float literal
+                //   `-` otherwise → Dash (relationship-pattern connector)
+                let next = bytes.get(i + 1).copied();
+                if next == Some(b'>') {
+                    out.push(Spanned {
+                        token: Token::Arrow,
+                        offset: start,
+                    });
+                    i += 2;
+                } else if next.map(|b| b.is_ascii_digit()).unwrap_or(false) {
+                    let (tok, end) = scan_number(input, i)?;
+                    out.push(Spanned {
+                        token: tok,
+                        offset: start,
+                    });
+                    i = end;
+                } else {
+                    out.push(Spanned {
+                        token: Token::Dash,
+                        offset: start,
+                    });
+                    i += 1;
+                }
+            }
+            '0'..='9' => {
                 let (tok, end) = scan_number(input, i)?;
                 out.push(Spanned {
                     token: tok,
