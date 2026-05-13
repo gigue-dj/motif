@@ -6,7 +6,10 @@
 
 use std::collections::BTreeMap;
 
-use super::ast::{BinOp, EdgePattern, Expr, NodePattern, Pattern, ReturnItem, Statement};
+use super::ast::{
+    BinOp, CollectTarget, EdgePattern, Expr, NodePattern, OrderBy, Pattern, ReturnItem,
+    SortDirection, Statement,
+};
 use super::lexer::{LexError, Spanned, Token};
 use crate::value::Value;
 
@@ -113,6 +116,11 @@ impl<'a> Parser<'a> {
                     Some(Token::Return) => {
                         self.advance();
                         let return_items = self.parse_return_items()?;
+                        let order_by = if matches!(self.peek(), Some(Token::Order)) {
+                            Some(self.parse_order_by()?)
+                        } else {
+                            None
+                        };
                         let limit = if matches!(self.peek(), Some(Token::Limit)) {
                             self.advance();
                             Some(self.parse_unsigned_int()?)
@@ -124,6 +132,7 @@ impl<'a> Parser<'a> {
                             patterns,
                             where_clause,
                             return_items,
+                            order_by,
                             limit,
                         })
                     }
@@ -280,23 +289,71 @@ impl<'a> Parser<'a> {
     fn parse_return_items(&mut self) -> Result<Vec<ReturnItem>, ParseError> {
         let mut items = Vec::new();
         loop {
-            let var = self.expect_ident("return variable")?;
-            let item = if matches!(self.peek(), Some(Token::Dot)) {
-                let path = self.parse_property_path()?;
-                ReturnItem::Property {
-                    variable: var,
-                    path,
-                }
-            } else {
-                ReturnItem::Variable(var)
-            };
-            items.push(item);
+            items.push(self.parse_return_item()?);
             if matches!(self.peek(), Some(Token::Comma)) {
                 self.advance();
             } else {
                 return Ok(items);
             }
         }
+    }
+
+    fn parse_return_item(&mut self) -> Result<ReturnItem, ParseError> {
+        let name = self.expect_ident("return variable or aggregate")?;
+        match (name.as_str(), self.peek()) {
+            ("count", Some(Token::LParen)) => {
+                self.advance();
+                // `count(*)` would need a `Star` token in the lexer;
+                // v0.0.4-alpha.4 accepts only `count(<variable>)`.
+                let target = self.expect_ident("variable inside count(...)")?;
+                self.expect(&Token::RParen, ")")?;
+                Ok(ReturnItem::Count {
+                    target: Some(target),
+                })
+            }
+            ("collect", Some(Token::LParen)) => {
+                self.advance();
+                let variable = self.expect_ident("variable inside collect(...)")?;
+                let inner = if matches!(self.peek(), Some(Token::Dot)) {
+                    let path = self.parse_property_path()?;
+                    CollectTarget::Property { variable, path }
+                } else {
+                    CollectTarget::Variable(variable)
+                };
+                self.expect(&Token::RParen, ")")?;
+                Ok(ReturnItem::Collect(inner))
+            }
+            _ => {
+                if matches!(self.peek(), Some(Token::Dot)) {
+                    let path = self.parse_property_path()?;
+                    Ok(ReturnItem::Property {
+                        variable: name,
+                        path,
+                    })
+                } else {
+                    Ok(ReturnItem::Variable(name))
+                }
+            }
+        }
+    }
+
+    /// Consumes `ORDER BY <expr> [ASC|DESC]`.
+    fn parse_order_by(&mut self) -> Result<OrderBy, ParseError> {
+        self.expect(&Token::Order, "ORDER")?;
+        self.expect(&Token::By, "BY")?;
+        let expr = self.parse_expr()?;
+        let direction = match self.peek() {
+            Some(Token::Asc) => {
+                self.advance();
+                SortDirection::Asc
+            }
+            Some(Token::Desc) => {
+                self.advance();
+                SortDirection::Desc
+            }
+            _ => SortDirection::Asc,
+        };
+        Ok(OrderBy { expr, direction })
     }
 
     /// Consume `.ident (.ident)*` and return the path. The leading dot
@@ -510,6 +567,7 @@ mod tests {
                 patterns,
                 where_clause,
                 return_items,
+                order_by: _,
                 limit,
             } => {
                 assert_eq!(patterns.len(), 1);

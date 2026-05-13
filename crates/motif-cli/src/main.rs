@@ -31,7 +31,13 @@ usage:
   motif bench [--nodes N] [--lookups M] [--backend memory|file]
               [--with-controller]
   motif bench --cold-start [--seed N] [--iterations N]
-              [--backend memory|file]";
+              [--backend memory|file]
+  motif bench --scale [--nodes N] [--edges M] [--lookups L]
+              [--backend memory|file]
+    v0.0.4-alpha.4: seeds a gigue-target graph (defaults: 10k nodes,
+    100k edges across 10 labels) and runs labelled edge MATCH queries
+    via the alpha.1 + alpha.4 indexes. Reports p50/p95/p99 + adjacency
+    index sanity.";
 
 #[derive(Debug, Clone, Copy)]
 enum Backend {
@@ -71,17 +77,20 @@ fn main() -> ExitCode {
             }
         },
         "bench" => {
-            let mut nodes = 1_000usize;
-            let mut lookups = 1_000usize;
+            let mut nodes: Option<usize> = None;
+            let mut edges: Option<usize> = None;
+            let mut lookups: Option<usize> = None;
             let mut backend = Backend::Memory;
             let mut with_controller = false;
             let mut cold_start = false;
+            let mut scale = false;
             let mut seed = 0usize;
             let mut iterations = 50usize;
             while let Some(arg) = args.next() {
                 match arg.as_str() {
-                    "--nodes" => nodes = parse_usize(&mut args, "--nodes"),
-                    "--lookups" => lookups = parse_usize(&mut args, "--lookups"),
+                    "--nodes" => nodes = Some(parse_usize(&mut args, "--nodes")),
+                    "--edges" => edges = Some(parse_usize(&mut args, "--edges")),
+                    "--lookups" => lookups = Some(parse_usize(&mut args, "--lookups")),
                     "--backend" => {
                         backend = match args.next().as_deref() {
                             Some("memory") => Backend::Memory,
@@ -95,6 +104,7 @@ fn main() -> ExitCode {
                     }
                     "--with-controller" => with_controller = true,
                     "--cold-start" => cold_start = true,
+                    "--scale" => scale = true,
                     "--seed" => seed = parse_usize(&mut args, "--seed"),
                     "--iterations" => iterations = parse_usize(&mut args, "--iterations"),
                     other => {
@@ -106,8 +116,20 @@ fn main() -> ExitCode {
             }
             if cold_start {
                 run_cold_start(seed, iterations, backend)
+            } else if scale {
+                run_scale_bench(
+                    nodes.unwrap_or(10_000),
+                    edges.unwrap_or(100_000),
+                    lookups.unwrap_or(1_000),
+                    backend,
+                )
             } else {
-                run_bench(nodes, lookups, backend, with_controller)
+                run_bench(
+                    nodes.unwrap_or(1_000),
+                    lookups.unwrap_or(1_000),
+                    backend,
+                    with_controller,
+                )
             }
         }
         other => {
@@ -325,5 +347,108 @@ fn run_cold_start(seed: usize, iterations: usize, backend: Backend) -> ExitCode 
         println!("  arch ................ {:?}", cap.arch);
         println!("  gpu_present ......... {:?}", cap.gpu_present);
     }
+    ExitCode::SUCCESS
+}
+
+/// Seed a gigue-target graph (10k nodes / 100k edges / 10 labels by
+/// default), time `MATCH (a)-[r:KNOWS]->(b) WHERE id(a) = $x`,
+/// report p50/p95/p99/mean.
+fn run_scale_bench(nodes: usize, edges: usize, lookups: usize, backend: Backend) -> ExitCode {
+    use motif_core::{Edge, Engine, Node};
+
+    let _tmp = match backend {
+        Backend::Memory => None,
+        Backend::File => Some(TempDir::new().expect("tempdir")),
+    };
+    let cfg = match backend {
+        Backend::Memory => bench_config(PathBuf::from(":memory:")),
+        Backend::File => bench_config(_tmp.as_ref().unwrap().path().join("scale.db")),
+    };
+
+    let mut engine = match backend {
+        Backend::Memory => Engine::open_in_memory(&cfg).expect("open in-memory"),
+        Backend::File => Engine::open(&cfg).expect("open file-backed"),
+    };
+
+    // Seed nodes.
+    let seed_start = Instant::now();
+    for i in 0..nodes {
+        engine
+            .insert_node(Node::new(format!("n{i}"), "Person"))
+            .expect("insert node");
+    }
+    let nodes_ms = seed_start.elapsed().as_secs_f64() * 1000.0;
+
+    // Seed edges across 10 labels, source uniformly across nodes,
+    // target rotated +k so adjacency is non-trivial.
+    let labels = [
+        "KNOWS",
+        "FOLLOWS",
+        "WORKED_WITH",
+        "MANAGED",
+        "MENTORED",
+        "INVITED",
+        "BLOCKED",
+        "STARRED",
+        "FORKED",
+        "PR",
+    ];
+    let edges_start = Instant::now();
+    for i in 0..edges {
+        let from = i % nodes;
+        let to = (i + 17) % nodes;
+        let label = labels[i % labels.len()];
+        engine
+            .insert_edge(Edge::new(
+                format!("e{i}"),
+                label,
+                format!("n{from}"),
+                format!("n{to}"),
+            ))
+            .expect("insert edge");
+    }
+    let edges_ms = edges_start.elapsed().as_secs_f64() * 1000.0;
+
+    // Run labelled edge MATCH queries. Each lookup picks a random
+    // source via `i % nodes` and asks for one of the 10 labels.
+    let query = "MATCH (a)-[r:KNOWS]->(b) WHERE id(a) = $x RETURN r";
+    let mut samples: Vec<f64> = Vec::with_capacity(lookups);
+    let mut params = Params::new();
+    for i in 0..lookups {
+        params.insert("x".into(), Value::String(format!("n{}", i % nodes)));
+        let t = Instant::now();
+        let _ = engine.query(query, &params).expect("query");
+        samples.push(t.elapsed().as_secs_f64() * 1_000_000.0);
+    }
+
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let p = |q: f64| -> f64 {
+        let idx = ((samples.len() - 1) as f64 * q).round() as usize;
+        samples[idx]
+    };
+    let p50 = p(0.50);
+    let p95 = p(0.95);
+    let p99 = p(0.99);
+    let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+
+    let backend_label = match backend {
+        Backend::Memory => "in-memory",
+        Backend::File => "file-backed (fsync per write)",
+    };
+
+    println!("motif bench --scale (native target)");
+    println!("  backend ............. {backend_label}");
+    println!("  nodes seeded ........ {nodes}");
+    println!(
+        "  edges seeded ........ {edges} across {} labels",
+        labels.len()
+    );
+    println!("  node seed time ...... {nodes_ms:.2} ms");
+    println!("  edge seed time ...... {edges_ms:.2} ms");
+    println!("  match lookups ....... {lookups} of `MATCH (a)-[r:KNOWS]->(b) WHERE id(a) = $x`");
+    println!("  match p50 ........... {p50:.2} µs");
+    println!("  match p95 ........... {p95:.2} µs");
+    println!("  match p99 ........... {p99:.2} µs");
+    println!("  match mean .......... {mean:.2} µs");
     ExitCode::SUCCESS
 }

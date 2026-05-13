@@ -16,7 +16,10 @@
 
 use std::collections::BTreeMap;
 
-use super::ast::{BinOp, EdgePattern, Expr, NodePattern, Pattern, ReturnItem, Statement};
+use super::ast::{
+    BinOp, CollectTarget, EdgePattern, Expr, NodePattern, OrderBy, Pattern, ReturnItem,
+    SortDirection, Statement,
+};
 use super::result::{QueryResult, ResultCell};
 use crate::engine::Engine;
 use crate::graph::{Edge, Node};
@@ -84,12 +87,14 @@ pub fn execute(
             patterns,
             where_clause,
             return_items,
+            order_by,
             limit,
         } => exec_match_return(
             engine,
             patterns,
             where_clause.as_ref(),
             return_items,
+            order_by.as_ref(),
             *limit,
             params,
         ),
@@ -159,38 +164,186 @@ fn exec_match_return(
     patterns: &[Pattern],
     where_clause: Option<&Expr>,
     return_items: &[ReturnItem],
+    order_by: Option<&OrderBy>,
     limit: Option<u64>,
     params: &Params,
 ) -> Result<QueryResult, InterpretError> {
-    let rows = find_match_rows(engine, patterns, where_clause, params, limit)?;
+    let aggregating = return_items.iter().any(is_aggregate);
 
-    let columns = return_items
-        .iter()
-        .map(|r| match r {
-            ReturnItem::Variable(v) => v.clone(),
-            ReturnItem::Property { variable, path } => {
-                let mut s = variable.clone();
-                for seg in path {
-                    s.push('.');
-                    s.push_str(seg);
-                }
-                s
-            }
-        })
-        .collect();
+    // LIMIT inside find_match_rows is only valid when neither ORDER
+    // BY nor an aggregate needs the full row set first.
+    let inline_limit = if aggregating || order_by.is_some() {
+        None
+    } else {
+        limit
+    };
+    let mut rows = find_match_rows(engine, patterns, where_clause, params, inline_limit)?;
 
-    let mut out_rows = Vec::with_capacity(rows.len());
-    for bindings in rows {
-        let mut row = Vec::with_capacity(return_items.len());
-        for r in return_items {
-            row.push(project(r, &bindings, engine)?);
-        }
-        out_rows.push(row);
+    if let Some(order) = order_by {
+        sort_rows(&mut rows, order, params, engine)?;
     }
+
+    let columns = return_items.iter().map(return_item_column_name).collect();
+
+    let out_rows = if aggregating {
+        project_aggregate_row(return_items, &rows, engine)?
+    } else {
+        let mut out: Vec<Vec<ResultCell>> = Vec::with_capacity(rows.len());
+        for bindings in &rows {
+            let mut row = Vec::with_capacity(return_items.len());
+            for r in return_items {
+                row.push(project(r, bindings, engine)?);
+            }
+            out.push(row);
+            if let Some(l) = limit {
+                if out.len() as u64 >= l {
+                    break;
+                }
+            }
+        }
+        out
+    };
+
     Ok(QueryResult {
         columns,
         rows: out_rows,
     })
+}
+
+fn is_aggregate(item: &ReturnItem) -> bool {
+    matches!(item, ReturnItem::Count { .. } | ReturnItem::Collect(_))
+}
+
+fn return_item_column_name(r: &ReturnItem) -> String {
+    match r {
+        ReturnItem::Variable(v) => v.clone(),
+        ReturnItem::Property { variable, path } => {
+            let mut s = variable.clone();
+            for seg in path {
+                s.push('.');
+                s.push_str(seg);
+            }
+            s
+        }
+        ReturnItem::Count { target } => match target {
+            Some(v) => format!("count({v})"),
+            None => "count(*)".to_string(),
+        },
+        ReturnItem::Collect(CollectTarget::Variable(v)) => format!("collect({v})"),
+        ReturnItem::Collect(CollectTarget::Property { variable, path }) => {
+            let mut s = format!("collect({variable}");
+            for seg in path {
+                s.push('.');
+                s.push_str(seg);
+            }
+            s.push(')');
+            s
+        }
+    }
+}
+
+fn project_aggregate_row(
+    return_items: &[ReturnItem],
+    rows: &[Bindings],
+    engine: &Engine,
+) -> Result<Vec<Vec<ResultCell>>, InterpretError> {
+    let mut row = Vec::with_capacity(return_items.len());
+    for item in return_items {
+        let cell = match item {
+            ReturnItem::Count { target: _ } => {
+                // `count(n)` and `count(*)` both collapse to the row
+                // count — alpha.4 doesn't track per-variable null
+                // semantics (every binding row has every variable
+                // bound, since unification is total).
+                ResultCell::Value(Value::I64(rows.len() as i64))
+            }
+            ReturnItem::Collect(target) => {
+                let mut list = Vec::with_capacity(rows.len());
+                for bindings in rows {
+                    let cell = collect_one(target, bindings, engine)?;
+                    list.push(cell);
+                }
+                ResultCell::Value(Value::List(list))
+            }
+            _ => {
+                return Err(InterpretError::TypeMismatch(
+                    "mixing aggregate and non-aggregate columns is not supported \
+                     (alpha.4 has no GROUP BY)"
+                        .into(),
+                ));
+            }
+        };
+        row.push(cell);
+    }
+    Ok(vec![row])
+}
+
+fn collect_one(
+    target: &CollectTarget,
+    bindings: &Bindings,
+    engine: &Engine,
+) -> Result<Value, InterpretError> {
+    match target {
+        // `collect(n)` for a node / edge variable returns the id as a
+        // string — a stopgap until `Value` grows Node / Edge variants
+        // (tracked in LIMITATIONS as alpha.4 deferred). `collect(n.prop)`
+        // is the well-shaped form callers should use today.
+        CollectTarget::Variable(v) => match bindings.get(v) {
+            Some(b @ (Binding::Node(_) | Binding::Edge(_))) => Ok(Value::String(b.id().to_owned())),
+            None => Err(InterpretError::UnknownVariable(v.clone())),
+        },
+        CollectTarget::Property { variable, path } => match bindings.get(variable) {
+            Some(Binding::Node(n)) => resolve_node_property_path(n, path, engine),
+            Some(Binding::Edge(e)) => resolve_edge_property_path(e, path),
+            None => Err(InterpretError::UnknownVariable(variable.clone())),
+        },
+    }
+}
+
+fn sort_rows(
+    rows: &mut [Bindings],
+    order: &OrderBy,
+    params: &Params,
+    engine: &Engine,
+) -> Result<(), InterpretError> {
+    // Pre-compute the sort key per row so the comparator doesn't
+    // re-evaluate the expression at each comparison. Stable sort
+    // preserves the natural pattern-walk order on equal keys.
+    let mut keyed: Vec<(Value, Bindings)> = Vec::with_capacity(rows.len());
+    for bindings in rows.iter() {
+        let key = eval_expr(&order.expr, bindings, params, engine)?;
+        keyed.push((key, bindings.clone()));
+    }
+    keyed.sort_by(|a, b| compare_for_sort(&a.0, &b.0, order.direction));
+    for (i, (_, b)) in keyed.into_iter().enumerate() {
+        rows[i] = b;
+    }
+    Ok(())
+}
+
+fn compare_for_sort(a: &Value, b: &Value, dir: SortDirection) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    // Cypher-ish total ordering: Null sorts last (in ASC) so missing
+    // values don't crowd the top of the result. Type-incomparable
+    // pairs (e.g. String vs I64) compare equal — the caller's
+    // pattern set is typically homogeneous in practice.
+    let nat = match (a, b) {
+        (Value::Null, Value::Null) => Ordering::Equal,
+        (Value::Null, _) => Ordering::Greater,
+        (_, Value::Null) => Ordering::Less,
+        (Value::I64(x), Value::I64(y)) => x.cmp(y),
+        (Value::F64(x), Value::F64(y)) => x.partial_cmp(y).unwrap_or(Ordering::Equal),
+        (Value::I64(x), Value::F64(y)) => (*x as f64).partial_cmp(y).unwrap_or(Ordering::Equal),
+        (Value::F64(x), Value::I64(y)) => x.partial_cmp(&(*y as f64)).unwrap_or(Ordering::Equal),
+        (Value::String(x), Value::String(y)) => x.cmp(y),
+        (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+        (Value::Timestamp(x), Value::Timestamp(y)) => x.cmp(y),
+        _ => Ordering::Equal,
+    };
+    match dir {
+        SortDirection::Asc => nat,
+        SortDirection::Desc => nat.reverse(),
+    }
 }
 
 fn exec_match_delete(
@@ -277,7 +430,9 @@ fn candidates_for_pattern(
 ) -> Result<Vec<Bindings>, InterpretError> {
     match pattern {
         Pattern::Node(np) => node_candidates(engine, np, where_clause, params),
-        Pattern::Path { start, chain } => path_candidates(engine, start, chain, params),
+        Pattern::Path { start, chain } => {
+            path_candidates(engine, start, chain, where_clause, params)
+        }
     }
 }
 
@@ -320,24 +475,40 @@ fn node_candidates(
 }
 
 /// Walk `(start)-[r1]->(n1)-[r2]->(n2)...` left-to-right, binding the
-/// path's variables along the way.
+/// path's variables along the way. Pushes down `WHERE id(start) = $x`
+/// to a single index lookup on the start node — pre-alpha.4 this
+/// materialized every node in the namespace as a start candidate.
 fn path_candidates(
     engine: &mut Engine,
     start: &NodePattern,
     chain: &[(EdgePattern, NodePattern)],
+    where_clause: Option<&Expr>,
     params: &Params,
 ) -> Result<Vec<Bindings>, InterpretError> {
     let mut rows: Vec<Bindings> = Vec::new();
-    let start_nodes = engine
-        .iter_nodes()
-        .map_err(|e| InterpretError::TypeMismatch(e.to_string()))?;
-    for node in start_nodes {
-        if !pattern_matches_node(start, &node) {
-            continue;
+    if let Some(id_value) = extract_id_predicate(where_clause, &start.variable, params)? {
+        if let Some(node) = engine
+            .get_node(&id_value)
+            .map_err(|e| InterpretError::TypeMismatch(e.to_string()))?
+        {
+            if pattern_matches_node(start, &node) {
+                let mut row = Bindings::new();
+                row.insert(start.variable.clone(), Binding::Node(node));
+                rows.push(row);
+            }
         }
-        let mut row = Bindings::new();
-        row.insert(start.variable.clone(), Binding::Node(node));
-        rows.push(row);
+    } else {
+        let start_nodes = engine
+            .iter_nodes()
+            .map_err(|e| InterpretError::TypeMismatch(e.to_string()))?;
+        for node in start_nodes {
+            if !pattern_matches_node(start, &node) {
+                continue;
+            }
+            let mut row = Bindings::new();
+            row.insert(start.variable.clone(), Binding::Node(node));
+            rows.push(row);
+        }
     }
 
     // The "from" variable for hop k is the path's start for k=0 and
@@ -345,14 +516,6 @@ fn path_candidates(
     // chain walk so we don't re-scan the chain per row.
     let mut prev_var = start.variable.clone();
     for (edge_pat, target_pat) in chain {
-        let candidate_edges = match &edge_pat.label {
-            Some(label) => engine
-                .iter_edges_by_label(label)
-                .map_err(|e| InterpretError::TypeMismatch(e.to_string()))?,
-            None => engine
-                .iter_edges()
-                .map_err(|e| InterpretError::TypeMismatch(e.to_string()))?,
-        };
         // Once per hop, not per edge — inline-property literals don't
         // depend on the bound row.
         let edge_props = eval_property_map(&edge_pat.properties, params)?;
@@ -363,10 +526,15 @@ fn path_candidates(
                 Some(Binding::Node(n)) => n,
                 _ => continue,
             };
+            // v0.0.4-alpha.4: O(degree) edge lookup via the
+            // `edges_by_from` adjacency index, intersected with
+            // `edge_by_label` when a label is declared. Pre-alpha.4
+            // this walked every edge in the label bucket and
+            // filtered by `edge.from` in memory.
+            let candidate_edges = engine
+                .iter_edges_from(&prev_node.id, edge_pat.label.as_deref())
+                .map_err(|e| InterpretError::TypeMismatch(e.to_string()))?;
             for edge in &candidate_edges {
-                if edge.from != prev_node.id {
-                    continue;
-                }
                 if !edge_pattern_matches(edge_pat, edge, &edge_props) {
                     continue;
                 }
@@ -686,6 +854,9 @@ fn project(
             Some(Binding::Edge(e)) => Ok(ResultCell::Value(resolve_edge_property_path(e, path)?)),
             None => Err(InterpretError::UnknownVariable(variable.clone())),
         },
+        ReturnItem::Count { .. } | ReturnItem::Collect(_) => {
+            unreachable!("aggregates dispatch to project_aggregate_row in exec_match_return")
+        }
     }
 }
 

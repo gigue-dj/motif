@@ -91,6 +91,15 @@ pub struct Engine {
     /// Edge label → ids. Empty buckets are dropped so the map's size
     /// tracks live labels, not every label ever seen.
     edge_by_label: HashMap<String, HashSet<String>>,
+    /// `edge.from` → ids carrying that source. Pairs with `edges_by_to`
+    /// to give O(degree) lookups for `MATCH (a)-[r]->(b)` (used in
+    /// `path_candidates`) and `DETACH DELETE` (used in
+    /// `delete_node_with_cascade`) — both previously walked
+    /// `iter_edges`. Empty buckets are dropped, same shape as
+    /// `edge_by_label`.
+    edges_by_from: HashMap<String, HashSet<String>>,
+    /// `edge.to` → ids carrying that target. See `edges_by_from`.
+    edges_by_to: HashMap<String, HashSet<String>>,
     /// Per-instance actor identity copied from `MotifConfig::identity`.
     /// Stamped onto every [`Mutation`] produced by this engine.
     actor: ActorId,
@@ -173,6 +182,8 @@ impl Engine {
             node_index: HashMap::new(),
             edge_index: HashMap::new(),
             edge_by_label: HashMap::new(),
+            edges_by_from: HashMap::new(),
+            edges_by_to: HashMap::new(),
             actor: ActorId {
                 user_id: config.identity.user_id.clone(),
                 device_id: config.identity.device_id.clone(),
@@ -387,13 +398,21 @@ impl Engine {
                     .entry(e.label.clone())
                     .or_default()
                     .insert(e.id.clone());
+                self.edges_by_from
+                    .entry(e.from.clone())
+                    .or_default()
+                    .insert(e.id.clone());
+                self.edges_by_to
+                    .entry(e.to.clone())
+                    .or_default()
+                    .insert(e.id.clone());
             }
             MutationOp::NodeDelete(id) => {
                 self.node_index.remove(id);
             }
             MutationOp::EdgeDelete(id) => {
                 if let Some(entry) = self.edge_index.remove(id) {
-                    self.remove_from_edge_label_index(id, entry)?;
+                    self.remove_edge_from_indexes(id, entry)?;
                 }
             }
             MutationOp::SchemaApply(s) => {
@@ -412,23 +431,19 @@ impl Engine {
         self.update_indexes_for(&m.op, offset, payload_len, m.foreshadow)
     }
 
-    /// Drop `id` from its `edge_by_label` bucket; remove the bucket
-    /// key if it goes empty, so map size tracks live labels rather
-    /// than every label ever seen. Reads the edge's label off disk —
-    /// keeps `IndexEntry` minimal (16 B, shared with `node_index`) at
-    /// the cost of one indexed read per edge delete. Bulk-delete
-    /// compaction (v0.0.6) revisits this if the read cost bites.
-    fn remove_from_edge_label_index(
-        &mut self,
-        id: &str,
-        entry: IndexEntry,
-    ) -> Result<(), EngineError> {
+    /// Drop `id` from `edge_by_label`, `edges_by_from`, and
+    /// `edges_by_to` — every secondary edge index. One indexed read
+    /// recovers the edge's `label` / `from` / `to`, the cost of
+    /// keeping `IndexEntry` minimal (16 B, shared with `node_index`).
+    /// Bulk-delete compaction (v0.0.6) revisits this if the per-edge
+    /// read bites.
+    fn remove_edge_from_indexes(&mut self, id: &str, entry: IndexEntry) -> Result<(), EngineError> {
         let op = self.read_op_at(&entry)?;
         let Some(MutationOp::EdgeInsert(e)) = op else {
             // Recovered op shape disagrees with the index entry's
             // kind — that's a corruption / desync state, not a
             // routine miss. Surface it instead of silently leaking
-            // the bucket entry.
+            // bucket entries.
             return Err(EngineError::Recovery {
                 offset: entry.offset,
                 source: crate::record::RecordError::Decode(bincode::error::DecodeError::Other(
@@ -436,12 +451,9 @@ impl Engine {
                 )),
             });
         };
-        if let Some(bucket) = self.edge_by_label.get_mut(&e.label) {
-            bucket.remove(id);
-            if bucket.is_empty() {
-                self.edge_by_label.remove(&e.label);
-            }
-        }
+        drop_from_index(&mut self.edge_by_label, &e.label, id);
+        drop_from_index(&mut self.edges_by_from, &e.from, id);
+        drop_from_index(&mut self.edges_by_to, &e.to, id);
         Ok(())
     }
 
@@ -563,20 +575,15 @@ impl Engine {
     /// crash mid-cascade leaves a consistent (no-dangling-edges)
     /// store on recovery.
     ///
-    /// O(N_total_edges): walks `iter_edges` to find incident edges.
-    /// At the gigue B2B target (1M+ edges) this is the same scan
-    /// path documented as a `[perf]` debt in `LIMITATIONS.md`; the
-    /// `(from, label)` adjacency index that closes that debt also
-    /// closes this one (close before the v0.0.4-alpha.4 perf
-    /// benchmark).
+    /// O(degree): uses the `edges_by_from` + `edges_by_to` adjacency
+    /// indexes added in v0.0.4-alpha.4.
     pub fn delete_node_with_cascade(&mut self, id: &str) -> Result<(bool, usize), EngineError> {
         if !self.has_node(id) {
             return Ok((false, 0));
         }
-        let edges = self.iter_edges()?;
-        let incident: Vec<String> = edges
+        let incident: Vec<String> = self
+            .iter_edges_incident_to(id)?
             .into_iter()
-            .filter(|e| e.from == id || e.to == id)
             .map(|e| e.id)
             .collect();
         let count = incident.len();
@@ -649,10 +656,60 @@ impl Engine {
     /// `edge_by_label` + one storage read per match. Empty Vec for
     /// labels with no live edges.
     pub fn iter_edges_by_label(&mut self, label: &str) -> Result<Vec<Edge>, EngineError> {
-        let ids: Vec<String> = match self.edge_by_label.get(label) {
-            Some(set) => set.iter().cloned().collect(),
+        self.materialize_edges(self.edge_ids_for_label(label))
+    }
+
+    /// Materialize live edges with `from == node_id`, optionally
+    /// filtered by `label`. O(degree) — looks up the
+    /// `edges_by_from` bucket (intersected with `edge_by_label` when
+    /// a label is given) and reads each edge from storage. Used by
+    /// the Cypher `MATCH (a)-[r]->(b)` interpreter to avoid scanning
+    /// every edge per row.
+    pub fn iter_edges_from(
+        &mut self,
+        node_id: &str,
+        label: Option<&str>,
+    ) -> Result<Vec<Edge>, EngineError> {
+        let from_set = match self.edges_by_from.get(node_id) {
+            Some(set) => set,
             None => return Ok(Vec::new()),
         };
+        let ids: Vec<String> = match label {
+            Some(label) => match self.edge_by_label.get(label) {
+                Some(label_set) => from_set.intersection(label_set).cloned().collect(),
+                None => return Ok(Vec::new()),
+            },
+            None => from_set.iter().cloned().collect(),
+        };
+        self.materialize_edges(ids)
+    }
+
+    /// Materialize every live edge incident to `node_id`, i.e. every
+    /// edge with `from == node_id` or `to == node_id`. O(degree).
+    /// Used by `delete_node_with_cascade` to replace the v0.0.4-
+    /// alpha.3 `iter_edges`-then-filter scan.
+    pub fn iter_edges_incident_to(&mut self, node_id: &str) -> Result<Vec<Edge>, EngineError> {
+        // A self-loop edge (`from == to == node_id`) lives in both
+        // buckets; dedupe via the HashSet so the materialize loop
+        // doesn't double-read.
+        let mut ids: HashSet<String> = HashSet::new();
+        if let Some(set) = self.edges_by_from.get(node_id) {
+            ids.extend(set.iter().cloned());
+        }
+        if let Some(set) = self.edges_by_to.get(node_id) {
+            ids.extend(set.iter().cloned());
+        }
+        self.materialize_edges(ids.into_iter().collect())
+    }
+
+    fn edge_ids_for_label(&self, label: &str) -> Vec<String> {
+        self.edge_by_label
+            .get(label)
+            .map(|set| set.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn materialize_edges(&mut self, ids: Vec<String>) -> Result<Vec<Edge>, EngineError> {
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
             let Some(entry) = self.edge_index.get(&id).copied() else {
@@ -786,6 +843,17 @@ impl Engine {
         let stmt = query::parse(cypher)?;
         let result = query::execute(self, &stmt, params).map_err(QueryError::from)?;
         Ok(result)
+    }
+}
+
+/// Drop `id` from `map[key]`'s set; if that empties the bucket,
+/// remove the key. Keeps the map's len() tracking live keys.
+fn drop_from_index(map: &mut HashMap<String, HashSet<String>>, key: &str, id: &str) {
+    if let Some(bucket) = map.get_mut(key) {
+        bucket.remove(id);
+        if bucket.is_empty() {
+            map.remove(key);
+        }
     }
 }
 
