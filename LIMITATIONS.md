@@ -156,6 +156,32 @@ pass can grep its way to the source.
 > disambiguation. `Statement::MatchReturn` + `MatchDelete` now
 > carry `Vec<Pattern>` instead of a single `NodePattern`.
 >
+> **v0.0.4-alpha.4 added:** `(from, label)` adjacency indexes
+> (`edges_by_from`, `edges_by_to`) + `iter_edges_from` /
+> `iter_edges_incident_to` APIs; closes the alpha.2 `path_candidates`
+> and alpha.3 `delete_node_with_cascade` perf debts in one pass.
+> Interpreter pushes `WHERE id(start) = $x` down into the start-node
+> lookup for path patterns (pre-alpha.4 this walked every node).
+> Cypher polish: `ORDER BY <expr> [ASC|DESC]`, `count(n)`,
+> `collect(n.prop)`. `motif bench --scale [--nodes N --edges M
+> --lookups L]` for motif's own numbers at the gigue B2B target.
+>
+> **v0.0.4-alpha.4 deferred (scope trims, all consistent with the
+> "ship measurable behaviour; don't preempt for a use case no
+> benchmark has sized" engineering principle):**
+> - `EdgeConfig.foreshadow_eager = false` buffer mode — needs a real
+>   bridge to validate the buffer-then-confirm flow; carries forward
+>   to v0.0.5 alongside the auth + crypto handshake work that gives
+>   us real bridges.
+> - `EdgeConfig.schema_cache = "fetch"` lazy fetch — same reason;
+>   real bridge needed for the round-trip.
+> - **Cross-engine perf benchmark vs upstream Kuzu.** Installing
+>   Kuzu in CI is alpha-sized work on its own; alpha.4 ships
+>   `motif bench --scale` for motif's own numbers (10k nodes +
+>   100k edges + indexed-edge MATCH: p50 = 2.67µs in-memory),
+>   the alpha.5 audit pass picks up the Kuzu side-by-side once a
+>   real measurement harness is set up.
+>
 > **v0.0.4-alpha.3 added:** property-type expansion + schema
 > property-type validation + `DETACH DELETE` cascade. `Value` gains
 > `Timestamp(i64)` (epoch ms) and `List(Vec<Value>)` variants;
@@ -349,13 +375,12 @@ pass can grep its way to the source.
   (`PropertyType::List(Box<PropertyType>)`) wait for a caller need.
   *Source:* `crates/motif-core/src/value.rs`,
   `crates/motif-core/src/schema.rs` (`PropertyType`).
-- `[perf]` **`delete_node_with_cascade` walks `iter_edges`.** O(N_total_edges) per
-  call. Same scan path as the v0.0.4-alpha.2 `path_candidates`
-  `edge.from` filter — a `(from, label) → edge_ids` adjacency index
-  collapses both to O(degree). Close before the v0.0.4-alpha.4 perf
-  benchmark vs upstream Kuzu.
+- ~~`[perf]` `delete_node_with_cascade` walks `iter_edges`~~ —
+  **closed in v0.0.4-alpha.4.** New `iter_edges_incident_to(node_id)`
+  unions the `edges_by_from` + `edges_by_to` adjacency-index buckets;
+  cascade is now O(degree) per call.
   *Source:* `crates/motif-core/src/engine.rs`
-  (`delete_node_with_cascade`).
+  (`delete_node_with_cascade`, `iter_edges_incident_to`).
 - ~~`[debt]` `Storage::truncate` does not enforce
   `new_len >= HEADER_LEN`~~ — **closed in v0.0.2-alpha.5.** Both
   `FileStorage::truncate` and `MemoryStorage::truncate` now return
@@ -395,6 +420,16 @@ pass can grep its way to the source.
   resolves the edge's properties.
   *Source:* `crates/motif-core/src/query/{ast,parser,interpreter}.rs`;
   `crates/motif-core/tests/edge_match.rs`.
+- `[debt]` **`collect(<variable>)` returns the id as a string for
+  Node / Edge bindings.** v0.0.4-alpha.4 ships `collect(n)` on a
+  node / edge variable by producing `Value::String(id)` because
+  `Value` has no `Node` / `Edge` variants. The well-shaped form is
+  `collect(n.<property>)`. Adding `Value::Node` + `Value::Edge`
+  variants needs a discriminant past index 6 — bumps
+  `FORMAT_VERSION` (per `value.rs` codec-layout pencil) and reshapes
+  every consumer that pattern-matches on `Value`. Lands when a
+  caller asks for the typed form.
+  *Source:* `crates/motif-core/src/query/interpreter.rs` (`collect_one`).
 - `[perf]` **Inline edge-property predicates are bucket-scan, not
   indexed.** v0.0.4-alpha.2 evaluates `-[r:LABEL {prop: v}]->` by
   walking the `edge_by_label` bucket for `LABEL` and filtering each
@@ -407,18 +442,19 @@ pass can grep its way to the source.
   *Source:* `crates/motif-core/src/query/interpreter.rs`
   (`path_candidates`, `edge_pattern_matches`); `MOTIF.md` v0.0.4
   milestone.
-- `[perf]` **`path_candidates` does a linear `edge.from` scan per
-  row per hop.** v0.0.4-alpha.2's interpreter materializes
-  `iter_edges_by_label(label)` once per hop and then walks the
-  entire bucket per binding row to find edges whose `from` matches
-  the previous node. At 100k+ edges in a popular label and many
-  rows, this is the dominant cost — flagged by alpha.2's simplify-
-  skill efficiency review as the headline perf gap. A
-  `(from, label) → Vec<edge_id>` adjacency index (or a per-hop
-  `from`-keyed grouping of the bucket) collapses it to O(degree).
-  Close before the alpha.4 perf benchmark vs upstream Kuzu.
-  *Source:* `crates/motif-core/src/query/interpreter.rs`
-  (`path_candidates` inner loop).
+- ~~`[perf]` `path_candidates` does a linear `edge.from` scan per
+  row per hop~~ — **closed in v0.0.4-alpha.4.** New `edges_by_from`
+  + `edges_by_to` adjacency indexes on `Engine`; new
+  `iter_edges_from(node_id, label)` API intersects the two buckets
+  for O(degree) lookup. `path_candidates` calls it per hop instead
+  of materializing-then-filtering. Also pushed the `WHERE id(start) = $x`
+  predicate down into the start-node lookup — pre-alpha.4 this
+  walked every node in the namespace as a start candidate. Combined
+  effect on the alpha.4 `motif bench --scale` (10k nodes + 100k
+  edges + indexed edge MATCH): **p50 31ms → 2.67µs (~10,000×)**.
+  *Source:* `crates/motif-core/src/engine.rs` (`iter_edges_from`,
+  `edges_by_from`, `edges_by_to`);
+  `crates/motif-core/src/query/interpreter.rs` (`path_candidates`).
 - `[perf]` **`find_match_rows` builds the full cartesian product
   before applying WHERE / LIMIT.** Multi-pattern `MATCH` with no
   shared variables produces |p1| × |p2| × … rows in memory before

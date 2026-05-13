@@ -16,11 +16,12 @@ pub enum Statement {
     /// `MERGE (n:Label {id: $id, ...})` — must include an `id` property
     /// so the engine can look the node up. No-op on hit, insert on miss.
     Merge { pattern: NodePattern },
-    /// `MATCH p1[, p2, ...] [WHERE expr] RETURN ... [LIMIT n]`
+    /// `MATCH p1[, p2, ...] [WHERE expr] RETURN ... [ORDER BY expr [ASC|DESC]] [LIMIT n]`
     MatchReturn {
         patterns: Vec<Pattern>,
         where_clause: Option<Expr>,
         return_items: Vec<ReturnItem>,
+        order_by: Option<OrderBy>,
         limit: Option<u64>,
     },
     /// `MATCH p1[, p2, ...] [WHERE expr] [DETACH] DELETE var`. When
@@ -84,6 +85,41 @@ pub enum ReturnItem {
     /// path of length > 1 with `_motif` as the first element addresses
     /// the metadata-as-data namespace (see MOTIF.md decision 19).
     Property { variable: String, path: Vec<String> },
+    /// `RETURN count(*)` or `RETURN count(n)`. v0.0.4-alpha.4
+    /// alongside `collect`. Collapses every binding row into one
+    /// result row. The `target` is `None` for `count(*)` and
+    /// `Some(variable)` for `count(n)`.
+    ///
+    /// No `GROUP BY` in alpha.4 — aggregate-only queries return one
+    /// row, non-aggregate queries return one row per binding.
+    /// Mixing aggregate + non-aggregate columns is not supported
+    /// (no implicit grouping).
+    Count { target: Option<String> },
+    /// `RETURN collect(n)` or `RETURN collect(n.name)`. Gathers
+    /// every projected value into a `Value::List` in one result row.
+    Collect(CollectTarget),
+}
+
+/// What `collect()` projects from each binding row before gathering.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CollectTarget {
+    Variable(String),
+    Property { variable: String, path: Vec<String> },
+}
+
+/// `ORDER BY <expr> [ASC|DESC]`. v0.0.4-alpha.4 ships one ordering
+/// key only; multiple keys (`ORDER BY a.age DESC, a.name ASC`) wait
+/// for a caller that needs them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrderBy {
+    pub expr: Expr,
+    pub direction: SortDirection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortDirection {
+    Asc,
+    Desc,
 }
 
 #[derive(Debug, Clone, PartialEq)]
