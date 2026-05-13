@@ -124,11 +124,12 @@ ordinary Cypher just like data.
 | **v0.0.3-alpha.3** | **Wasm storage shim.** Closes the wasm-`MemoryStorage`-only gap. New `motif_wasm::WasmHostStorage` + `MotifHostStorage` JS interface (`append` / `readAt` / `len` / `truncate` / optional `freeSpace`) lets hosts plug in OPFS / app sandbox / RN bridge / etc. New entry point `Motif::open_with_host_storage(toml, storage)`. **No canonical OPFS impl in motif-wasm** — host territory, same posture as the bridges architecture. `Storage` trait gains a `MaybeSend` marker (drops the `Send` bound on wasm32 only — `JsValue` is `!Send`); native still requires `Send`. New `StorageError::JsHostError { message }` variant for host-thrown exceptions. Capability-probe wasm extension (`navigator.*`) parked for the alpha.5 audit pass. 100 tests (+3 host_storage integration). WASM 790 KB / 37.7% of 2 MiB budget. | ✅ shipped |
 | **v0.0.3-alpha.4** | **Native target landing.** New `motif-ffi` crate (`cdylib` + `rlib`) — minimum-viable C ABI shim for hosts that consume motif as a dylib instead of wasm (Swift on iOS, Kotlin on Android, edge runtimes that aren't wasm hosts). Single symbol shipped (`motif_version` returning a NUL-terminated C string); engine surface (`motif_open` / `motif_query` / `motif_close`) lands in v0.0.4 alongside the crates.io publish, when the public API is stable enough to commit to a C ABI shape. Workspace `unsafe_code = "forbid"` overridden inside `motif-ffi` only — every other crate stays forbid-unsafe. New CI matrix `native-targets` runs `cargo check` on `aarch64-apple-ios` + `aarch64-linux-android` for both `motif-core` and `motif-ffi` (compilation smoke; full link needs Apple's clang or Android NDK and is deferred to alpha.5 audit pass — possibly with a macOS runner). 101 tests (+1 motif-ffi unit). | ✅ shipped |
 | **v0.0.3-alpha.5** | **Audit pass.** Wasm capability probe closed by code fix — `navigator.deviceMemory` (RAM; Chrome-only, anti-fingerprinting-rounded, returns `None` on Firefox / Safari) + `navigator.hardwareConcurrency` (cores; well-supported across evergreen browsers + Node + Deno + Bun) via `js-sys::Reflect` on `globalThis.navigator`. Same `resolve()` semantics as native — declared TOML wins per-field. Cold-start budget / wasm-bindgen-test CI / native cdylib full-link CI explicitly deferred to v0.0.4 alongside the crates.io publish (when first consumers anchor the budget). LIMITATIONS sweep: alpha.1 → alpha.5 added/retired/accepted blocks; audit cadence footer updated. CodeRabbit + manual review found nothing actionable across PRs 11–14. | ✅ shipped |
-| **v0.0.4** | **"Real Cypher queries at scale" — North Star: apps express queries without falling back to engine API, on graphs sized the way gigue actually uses them.** Edge queries `MATCH (a)-[r]->(b)`; multi-pattern `MATCH`; `DETACH DELETE` / cascade; property type expansion (timestamps + lists at minimum); property-type validation against schema; `ORDER BY` + simple aggregates (`count`, `collect`); edge label + property indexes (graduated from "alpha.5+ work" — gigue B2B target makes O(N) edge scans non-negotiable); ID-namespace split (nodes / edges separate); `foreshadow_eager = false` buffer mode; `schema_cache = "fetch"` lazy fetch; performance benchmark vs upstream Kuzu. **First crates.io publish** for `motif-core` / `motif-wasm` / `motif-cli` / `motif-ffi` with a pre-v0.1 "fluid API; expect breakage" README note — public-but-not-frozen API surface. **Publish gates on a focused security audit of `motif-ffi`'s `unsafe` surface** (the workspace's only `forbid` exception); the audit checklist lives in `LIMITATIONS.md`. | in flight |
+| **v0.0.4** | **"Real Cypher queries at scale" — North Star: apps express queries without falling back to engine API, on graphs sized the way gigue actually uses them.** Edge queries `MATCH (a)-[r]->(b)`; multi-pattern `MATCH`; `DETACH DELETE` / cascade; property type expansion (timestamps + lists at minimum); property-type validation against schema; `ORDER BY` + simple aggregates (`count`, `collect`); edge label + property indexes (graduated from "alpha.5+ work" — gigue B2B target makes O(N) edge scans non-negotiable); ID-namespace split (nodes / edges separate); `foreshadow_eager = false` and `schema_cache = "fetch"` carry to v0.0.5 (need a real bridge to validate); cross-engine perf vs Kuzu deferred to an offline maintainer-run protocol (documented in `KUZU_DIVERGENCE.md`). **First crates.io publish** for `motif-core` / `motif-wasm` / `motif-cli` / `motif-ffi` with a pre-v0.1 "fluid API; expect breakage" README note — public-but-not-frozen API surface. `motif-ffi` ships its minimal v0.0.3-alpha.4 surface (`motif_version` only); engine surface defers to v0.0.5+ when the public API is stable enough to commit to a C ABI shape. Publish gated on a focused security audit of `motif-ffi`'s `unsafe` surface (the workspace's only `forbid` exception); audit closed in alpha.5, results + future-pass checklist live in `crates/motif-ffi/src/lib.rs` module doc. | in flight |
 | **v0.0.4-alpha.1** | **Storage scale foundation.** ID-namespace split: `Engine.index` becomes `node_index` + `edge_index` as independent `HashMap<String, IndexEntry>` maps; a node and an edge can share the same id without colliding (typed accessors keep the namespace unambiguous). New `edge_by_label` index (`HashMap<String, HashSet<String>>`) + `iter_edges_by_label(&str)` public API — `MATCH ()-[r:LABEL]->()` (lands alpha.2) becomes O(matches) rather than O(N_total_edges). Edge property index defers to alpha.2 alongside the MATCH syntax that motivates it; node label / property indexes stay deferred (10k node ceiling). 107 tests (+6 namespace_split integration). | ✅ shipped |
 | **v0.0.4-alpha.2** | **Cypher edge surface.** `MATCH (a)-[r]->(b)` with optional `:LABEL` and inline `{prop: v}` predicates parses + interprets. Multi-hop `(a)-[r]->(b)-[s]->(c)` and multi-pattern `MATCH p1, p2` (shared variables unify on id). Label predicate hits the alpha.1 `edge_by_label` index; inline-property predicates filter via bucket-scan (dedicated edge property index **deferred** — adds memory cost preemptively for a use case no benchmark has measured; lands later if a real bucket-scan bottleneck appears). New lexer tokens (`LBracket`, `RBracket`, `Arrow`, `Dash`) with `-`-vs-`->`-vs-negative-literal disambiguation. `Statement::MatchReturn`/`MatchDelete` take `Vec<Pattern>`. New `ResultCell::Edge` variant; `RETURN r.prop` resolves edge properties. 120 tests (+9 edge_match integration, +4 parser unit). | ✅ shipped |
 | **v0.0.4-alpha.3** | **Property types + schema validation + DETACH DELETE.** `Value` gains `Timestamp(i64)` (epoch ms) and `List(Vec<Value>)` variants; `PropertyType` matches with `Timestamp` and `List`; format version bumps 3 → 4 (older stores rejected at open). Codec discriminant layout pencilled in `value.rs` module doc with reservations for v0.0.5+ `Blob` / `Map` / `Struct`, fingerprinted by a unit test (a future contributor's reorder fails the test loudly). `Engine::insert_node` / `insert_edge` now validate property types against the controller-pushed schema; new `EngineError::SchemaPropertyTypeMismatch` carries label + property + declared + actual + schema version. Permissive on undeclared properties; `Value::Null` accepted for any declared type. `Engine::delete_node_with_cascade` + Cypher `DETACH DELETE n` remove a node and every incident edge; plain `DELETE` keeps the dangling-edges shape. **Closes v0.0.2 exit criterion 5** (schema race surfaces clean state, not silent corruption — recovery is permissive replay; new inserts under the latest schema get the clean error path). 139 tests (+7 property_types integration, +5 detach_delete integration, +7 unit). | ✅ shipped |
 | **v0.0.4-alpha.4** | **Query polish + adjacency index + scale bench.** New `edges_by_from` + `edges_by_to` adjacency indexes; `iter_edges_from(node, label)` + `iter_edges_incident_to(node)` APIs. Closes the alpha.2 `path_candidates` and alpha.3 `delete_node_with_cascade` perf debts in one pass. Interpreter pushes `WHERE id(start) = $x` down into the start-node lookup for path patterns. Cypher polish: `ORDER BY <expr> [ASC\|DESC]`, `count(n)`, `collect(n.prop)`. `motif bench --scale` for motif's own numbers at the gigue B2B target — **10k nodes + 100k edges, indexed edge MATCH p50 = 2.67µs (10,000× over pre-alpha.4 path_candidates).** Scope trims (all documented in LIMITATIONS): `foreshadow_eager = false` + `schema_cache = "fetch"` carry forward to v0.0.5 (need a real bridge to validate); cross-engine perf benchmark vs upstream Kuzu moves to v0.0.4-alpha.5 audit pass (Kuzu install + harness is alpha-sized work on its own). 148 tests (+9 query_polish integration). | ✅ shipped |
+| **v0.0.4-alpha.5** | **Audit pass + first crates.io publish gate.** `motif-ffi` `unsafe` audit cleared (single symbol `motif_version`; no pointer params; no `unsafe impl Send/Sync`; C ABI is `*const c_char` only; workspace `forbid` lint intact on every other crate; audit results recorded inline in `crates/motif-ffi/src/lib.rs` module doc and footer in `LIMITATIONS.md`). Workspace `publish = false` → `true` flipped. `motif-ffi` ships **minimal** at v0.0.4 (`motif_version` only); engine surface (`motif_open` / `motif_query` / `motif_close`) deferred to v0.0.5+ when the public API is stable enough to commit to a C ABI shape — keeps the audit small and gets the crates.io presence earlier. Cross-engine perf benchmark vs Kuzu deferred to an offline maintainer-run protocol (Kuzu prebuilt binary install + equivalent Person/KNOWS fixture; protocol + TBD numbers table in `KUZU_DIVERGENCE.md`). Docs sweep: README pre-v0.1 + Install section + motif-ffi in workspace listing; `motif-core/src/lib.rs` module doc refreshed from stale "v0.0.2-alpha.2" to current Engine / Schema / Cypher surface; LIMITATIONS retired/accepted block for alpha.5; MOTIF.md namechange pencil-in (see Open questions). 148 tests (no functional changes; audit-only pass). | in flight |
 | **v0.0.5** | **"Hostile-device-aware" — North Star: auth + encryption are real, host policy is honoured, no quiet escape hatches.** New `[security]` TOML section: `require_authenticated_channel`, `min_aead`, `pq_required`, suite allow-list. Bridges advertise their crypto suite at handshake; motif validates declared-vs-policy and surfaces `ControllerSecurityError` on mismatch. Opt-out is explicitly named `Engine::dangerously_*` (Rust convention). SOTA-classical allow-list (X25519, ChaCha20-Poly1305, AES-GCM) is B2B table stakes. **PQ forward-compat plumbing** — Signal-PQXDH-style scanner, fail-visible when host requires PQ but bridge doesn't advertise; PQ implementation itself is stretch. Host token-issuance and controller key-rotation flows documented + tested. Encryption-at-rest design + impl. CRC on records. Tee panic-safety test. | planned |
 | **v0.0.6** | **"Scale and operate" — North Star: confidence at the gigue B2B target (1M+ edges) and observability that survives a long-lived edge service.** Scale benchmarks at 1M edges + 10k nodes (p50 / p95 / p99 across query, insert, replay); `retention_confirmed_secs` log compaction; disk-size optimization (compression of bincode payloads, dictionary if it pays); `hoverphone` test profile via interleaved-test runner (closes v0.0.2 exit criterion 11 carry-over); multi-tenant evaluation (multiple `Engine` instances per host); backup / restore / migration design; WASM-size microtask trampoline if the futures-util budget bites. | planned |
 | **v0.1.0** | **"OSS-ready" — North Star: external contributors `cargo add motif-core` with semver promises; first concrete bridge ships independently.** Public API freeze + audit; semver policy documented; first concrete bridge crate (the experience answers the `bridges/` vs `hubs/` partition question); bridge-author + hub-author guides; documentation pass (API docs, getting-started, deployment); `cpp-reference/` archived to a separate tag / repo. | planned |
@@ -245,17 +246,20 @@ Distribution:
   break.
 - **Publish gate: focused security audit of `motif-ffi`'s `unsafe`
   surface.** v0.0.3-alpha.4 shipped the crate with a single symbol
-  (`motif_version`, no real `unsafe`); v0.0.4-alpha.5 grows the
-  engine surface (`motif_open` / `motif_query` / `motif_close`)
-  with pointer-taking `extern "C"` functions. Before flipping
-  `publish = false` → `true`, run a dedicated security pass on
-  every `unsafe` block: SAFETY comments name caller invariants;
-  pointers are null/alignment-checked before deref; handle ownership
-  / lifetime is documented and tested; no audited `unsafe impl
-  Send/Sync` slips in; C ABI types don't leak Rust enum layout.
-  Checklist in `LIMITATIONS.md`. motif-ffi is the workspace's only
-  `unsafe_code = "forbid"` relaxer — it deserves the clear line of
-  sight before strangers start linking against it.
+  (`motif_version`, no real `unsafe`); v0.0.4-alpha.5 audits that
+  minimal surface and ships it as-is to crates.io. Engine surface
+  (`motif_open` / `motif_query` / `motif_close`) with pointer-taking
+  `extern "C"` functions defers to v0.0.5+ when the public API is
+  stable enough to commit to a C ABI shape — keeps the audit small
+  and gets crates.io presence earlier. The same checklist applies
+  when the engine surface lands: SAFETY comments name caller
+  invariants; pointers are null/alignment-checked before deref;
+  handle ownership / lifetime is documented and tested; no audited
+  `unsafe impl Send/Sync` slips in; C ABI types don't leak Rust enum
+  layout. Checklist + audit results live in `crates/motif-ffi/src/lib.rs`
+  module doc. motif-ffi is the workspace's only `unsafe_code = "forbid"`
+  relaxer — it deserves the clear line of sight before strangers start
+  linking against it.
 
 ### v0.0.5 — "Hostile-device-aware"
 
@@ -351,14 +355,34 @@ These appeared in v0.0.2 planning but have no destination yet:
 
 ## Open questions
 
-These wait on the first concrete bridge crate to answer:
-
-1. **Bridge test parameterisation.** How do `default` / `potato` /
+1. **Project name evaluation — resolve before v0.1.0.** Penciled in
+   during the v0.0.4-alpha.5 audit pass. "Motif" collides with a
+   preponderance of "motif"-named databases and library tools in the
+   wider market, especially in biostatistics / bioinformatics
+   (sequence motif discovery), where "motif DB" is an entrenched
+   term of art. The collision is discoverability cost, not legal —
+   but it compounds the closer we get to v0.1.0 (API freeze + first
+   external bridge consumers + first crates.io anchor versions). The
+   front-runner replacement is **`morceau`** ("piece" / "fragment"
+   in French; preserves the musical-vocabulary thread from "motif"
+   without the namespace collision); other candidates are being
+   hashed out. Decision shape: pick a name **before** v0.1.0 freezes
+   the public crate names on crates.io. A post-audit micro-sed run
+   then lands on a dedicated branch (workspace + crate names +
+   identifiers + docs); v0.0.4 ships under "motif" because the
+   audit-pass scope is closed and the publish gate is unblocked.
+   Cost of deferring past v0.1.0: rename becomes a breaking change
+   that requires deprecation aliases on crates.io. Cost of doing it
+   pre-v0.1.0: a single mechanical sweep on an otherwise-quiet
+   alpha. Tracking lives here until the name lands.
+2. **Bridge test parameterisation.** How do `default` / `potato` /
    `hoverphone` profiles get applied across multiple bridge crates
-   without duplicating CI matrices?
-2. **`bridges/` vs `hubs/` partition.** First bridge and first hub
+   without duplicating CI matrices? Waits on the first concrete
+   bridge crate.
+3. **`bridges/` vs `hubs/` partition.** First bridge and first hub
    will tell us whether the directory split is worth keeping or
-   whether everything wants to be `motif-*-ext/` or similar.
+   whether everything wants to be `motif-*-ext/` or similar. Waits
+   on the first concrete bridge crate.
 
 ## Repository layout
 

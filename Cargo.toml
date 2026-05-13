@@ -13,7 +13,11 @@ edition = "2021"
 rust-version = "1.78"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/gigue-dj/motif"
-publish = false
+# v0.0.4-alpha.5 flipped this from `false`. The audit pass cleared
+# the motif-ffi unsafe surface (see crates/motif-ffi/src/lib.rs);
+# v0.0.4 is the first crates.io publish with explicit "pre-v0.1;
+# fluid API; expect breakage" semantics in the README.
+publish = true
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
