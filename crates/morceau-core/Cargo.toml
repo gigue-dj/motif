@@ -1,0 +1,62 @@
+[package]
+name = "morceau-core"
+description = "morceau-db: tiny embedded follower graph store. Engine library."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+readme = "../../README.md"
+keywords = ["graph", "database", "embedded", "cypher", "wasm"]
+categories = ["database-implementations", "embedded", "wasm"]
+
+[features]
+default = ["in-memory-controller"]
+# Pulls in the `InMemoryController` shipped with morceau-core. On by
+# default so tests, the dev CLI, and hosts that don't want to wire a
+# real bridge can still get a working engine. Production builds that
+# wire their own controller via a `morceau-*-bridge` crate can disable
+# with `default-features = false` to drop the in-memory implementation.
+in-memory-controller = []
+
+[dependencies]
+serde = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+bincode = { workspace = true }
+# v0.0.3-alpha.1: lightweight observability. No-op when no subscriber
+# is wired; hosts opt into `tracing-subscriber` if they want logs.
+tracing = { workspace = true }
+
+# v0.0.3-alpha.1: native-only capability probe (sysinfo for RAM,
+# fs2 for available_space on the storage path). wasm32 returns
+# all-None probes through alpha.3 — the storage shim (and its
+# host-supplied free_space) lands then.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+sysinfo = { workspace = true }
+fs2 = { workspace = true }
+
+# Worker-thread-per-controller scaffolding (v0.0.2-alpha.2). Native uses
+# std::thread + std::sync::mpsc directly (no extra deps); wasm uses
+# wasm-bindgen-futures::spawn_local + futures-channel for the async edge.
+# v0.0.3-alpha.2 adds gloo-timers for real setTimeout-backed sleep on
+# wasm (replaces the alpha-4 future::ready no-op).
+# The wasm deps are target-gated so native builds stay slim.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+futures-channel = { workspace = true }
+futures-util = { workspace = true }
+gloo-timers = { workspace = true }
+# v0.0.3-alpha.5: js-sys for navigator.hardwareConcurrency /
+# navigator.deviceMemory probing (capability auto-discovery on wasm).
+# Already transitively pulled in by wasm-bindgen-futures; declared
+# explicitly so the import isn't accidentally invisible-coupled.
+js-sys = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

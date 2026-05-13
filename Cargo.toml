@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/motif-core",
-    "crates/motif-ffi",
-    "crates/motif-wasm",
-    "crates/motif-cli",
+    "crates/morceau-core",
+    "crates/morceau-ffi",
+    "crates/morceau-wasm",
+    "crates/morceau-cli",
 ]
 
 [workspace.package]
@@ -12,9 +12,9 @@ version = "0.0.3"
 edition = "2021"
 rust-version = "1.78"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/gigue-dj/motif"
+repository = "https://github.com/morceau-db/morceau-db"
 # v0.0.4-alpha.5 flipped this from `false`. The audit pass cleared
-# the motif-ffi unsafe surface (see crates/motif-ffi/src/lib.rs);
+# the morceau-ffi unsafe surface (see crates/morceau-ffi/src/lib.rs);
 # v0.0.4 is the first crates.io publish with explicit "pre-v0.1;
 # fluid API; expect breakage" semantics in the README.
 publish = true
@@ -27,7 +27,7 @@ thiserror = "1"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 # v0.0.3-alpha.3: js-sys for Uint8Array marshalling in the wasm
-# host-storage shim (motif-wasm).
+# host-storage shim (morceau-wasm).
 js-sys = "0.3"
 futures-channel = { version = "0.3", default-features = false, features = ["std", "alloc"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
@@ -41,10 +41,10 @@ tempfile = "3"
 # is wired). Required for the cold-start measurement North Star.
 tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
 # v0.0.3-alpha.1: native-only capability probing. Both crates are
-# target-gated in motif-core so wasm32 builds don't pull them.
+# target-gated in morceau-core so wasm32 builds don't pull them.
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 fs2 = "0.4"
-motif-core = { path = "crates/motif-core", version = "0.0.3" }
+morceau-core = { path = "crates/morceau-core", version = "0.0.3" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
