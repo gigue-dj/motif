@@ -117,20 +117,65 @@ path; the upstream Kuzu had nothing to port here.
 
 ## Performance comparison
 
-Not yet measured. The v0.0.4 milestone ("Real Cypher queries at
-scale") includes a benchmark vs upstream Kuzu — by-id lookup path
-plus a representative non-id `MATCH` once edge indexes are in place.
-Sanity check: are we within 10× the right ballpark at the gigue B2B
-target (1k–10k nodes, 100k–1M+ edges)?
+### Motif numbers (`motif bench --scale`)
 
-We expect the direct comparison to be unflattering on Kuzu's side
-at small N (Motif has no buffer manager / no MVCC / no planner
-overhead) and unflattering on ours at large N (no vectorised
-executor, no morsel parallelism). The crossover point is the
-actual interesting datum.
+| Workload | p50 | p95 | p99 | mean |
+|---|---|---|---|---|
+| 10k nodes, 100k edges (10 labels), in-memory, indexed edge `MATCH` with id-pushdown on start node | **2.67 µs** | 22.57 µs | 25.87 µs | 4.99 µs |
 
-`motif bench` is the harness today (`--backend memory|file`,
-`--with-controller`); cross-engine comparison lands in v0.0.4.
+Seed times on the same fixture: node seed 4.47 ms, edge seed
+173.81 ms (across 100k commits with the alpha.1 + alpha.4 indexes
+maintained per-commit).
+
+Query shape:
+```
+MATCH (a)-[r:KNOWS]->(b) WHERE id(a) = $x RETURN r
+```
+
+The MATCH hits the v0.0.4-alpha.4 `iter_edges_from` path (intersects
+`edges_by_from[a]` with `edge_by_label[KNOWS]`); the start-node
+binding short-circuits via the alpha.3 `id(...)` predicate-pushdown
+into `get_node`. Pre-alpha.4 the same workload p50 was **31,269 µs**
+(~10,000× slower) because `path_candidates` walked every node in
+the namespace and every edge in the label bucket.
+
+### Cross-engine comparison protocol (Kuzu)
+
+v0.0.4-alpha.5 deliberately runs the Kuzu side **offline** rather
+than installing Kuzu in CI — installing + harness-building Kuzu is
+alpha-sized work on its own, and one measurement doesn't justify it
+yet. Long-term we'll want a prebuilt-binary path + a matrix across
+simulated device profiles.
+
+To run the comparison locally:
+
+1. Install a Kuzu release matching the cpp-reference baseline
+   (`cpp-reference/CMakeLists.txt` for the pinned version).
+2. Seed the equivalent fixture in Kuzu:
+   - Node table `Person(id STRING PRIMARY KEY)` with 10k rows
+     (`n0`..`n9999`).
+   - Rel table `KNOWS FROM Person TO Person` with 10k edges of
+     the form `n_i -KNOWS-> n_(i+17) % 10000` (motif's
+     `motif bench --scale` uses `from = i % nodes`,
+     `to = (i + 17) % nodes` for the `KNOWS` label specifically;
+     ignore the other 9 labels for the cross-engine measurement).
+3. Run the equivalent query 1000× and report p50 / p95 / p99 / mean:
+   ```cypher
+   MATCH (a:Person)-[r:KNOWS]->(b:Person) WHERE a.id = $x RETURN r
+   ```
+4. Paste numbers in the table below.
+
+### Kuzu numbers (offline measurement; awaiting maintainer run)
+
+| Workload | p50 | p95 | p99 | mean |
+|---|---|---|---|---|
+| 10k nodes, 10k `KNOWS` edges, in-memory, label+id `MATCH` | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
+
+We expect the comparison to be unflattering on Kuzu's side at this
+N (motif has no buffer manager / no MVCC / no planner overhead) and
+unflattering on ours at large N (no vectorised executor, no morsel
+parallelism). The crossover point is the actual interesting datum
+— add a 1M-edge row to the table once v0.0.6's scale work lands.
 
 ## What we kept
 

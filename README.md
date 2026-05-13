@@ -2,11 +2,15 @@
 
 **Motif** is a tiny, embedded follower graph store. It targets Swift and Rust application codebases on mobile and edge, with integrity outsourced to an upstream **controller** database via a generic trait — concrete controller bridges (SurrealDB, Supabase, ClickHouse, Nebula, ...) ship as optional separate crates.
 
-> **Status:** **v0.0.1 shipped, v0.0.2 in flight.** v0.0.1 delivered the engine, hand-rolled Cypher subset, sync skeleton, and wasm bindings. v0.0.2 lands persisted mutation log + foreshadow tracking, the abstract `Controller` trait + thread-per-controller model, schema push, reconnect / offline state machine, and a `[capability]` profile that lets the controller decide between `edge-is-tiny` and `edge-is-free` strategies. See [`MOTIF.md`](./MOTIF.md) for the design rationale, locked-in decisions, and milestone plan, and [`LIMITATIONS.md`](./LIMITATIONS.md) for the running ledger of known caveats.
+> **Status:** **v0.0.4 shipping — first crates.io publish.** Through v0.0.4 motif ships the engine + hand-rolled Cypher subset (edge MATCH, multi-hop, multi-pattern, ORDER BY, count / collect, DETACH DELETE), persisted mutation log, abstract `Controller` trait + thread-per-controller worker with reconnect, schema push with property-type validation, ID-namespace split + edge label / adjacency indexes (gigue B2B target: 1k–10k nodes, 100k–1M+ edges; `motif bench --scale` p50 = 2.67 µs), `[capability]` auto-discovery (native + wasm), wasm host-storage shim, native cdylib targets (iOS / Android via `motif-ffi`), tracing-instrumented hot paths, and cold-start measurement.
 >
-> - **`cpp-reference/`** — alpha.1 C++ tree, scoped down from upstream Kuzu. Frozen reference; not the shipping artifact. Retains its original [Kuzu MIT license](./cpp-reference/LICENSE-MIT-KUZU). Will be archived (separate tag / repo) post-v0.0.2.
-> - **Top level** — Rust workspace (`crates/motif-core`, `crates/motif-wasm`, `crates/motif-cli`).
-> - **`bridges/` + `hubs/`** — planned partitions for optional controller-transport crates and host-side event/MCP layers; first arrivals post-v0.0.2.
+> **Pre-v0.1: fluid API; expect breakage.** The crates publish at v0.0.x with explicit "don't pin until v0.1.0" semantics. v0.1.0 freezes the public API and adds semver promises (see [`MOTIF.md`](./MOTIF.md) long-run strategy).
+>
+> See [`MOTIF.md`](./MOTIF.md) for the design rationale, locked-in decisions, and milestone plan, and [`LIMITATIONS.md`](./LIMITATIONS.md) for the running ledger of known caveats.
+>
+> - **`cpp-reference/`** — alpha.1 C++ tree, scoped down from upstream Kuzu. Frozen reference; not the shipping artifact. Retains its original [Kuzu MIT license](./cpp-reference/LICENSE-MIT-KUZU). Archived (separate tag / repo) on v0.1.0.
+> - **Top level** — Rust workspace (`crates/motif-core`, `crates/motif-wasm`, `crates/motif-cli`, `crates/motif-ffi`).
+> - **`bridges/` + `hubs/`** — planned partitions for optional controller-transport crates and host-side event/MCP layers; first arrivals post-v0.0.4.
 
 ## Architecture in one paragraph
 
@@ -14,18 +18,31 @@ A host application (Swift or Rust, on mobile or edge) embeds Motif as a WASM mod
 
 ## Design constraints
 
-- **Tiny binary.** Target <2 MB after `wasm-opt -Oz` (v0.0.1 actual: 414 KB).
-- **Tiny on-disk footprint.** Single-file storage; no bundled extensions; mutation log lives in the same file from v0.0.2.
-- **Fast I/O.** <50 ms p50 single-key read on mid-tier mobile via the host's wasm runtime (v0.0.1 actual: 1.22 µs native).
+- **Tiny binary.** Target <2 MB after `wasm-opt -Oz` (v0.0.4 actual: 851 KB / 40.6% of budget).
+- **Tiny on-disk footprint.** Single-file storage; no bundled extensions; mutation log lives in the same file.
+- **Fast I/O.** <50 ms p50 single-key read on mid-tier mobile via the host's wasm runtime. v0.0.4 numbers (native, `motif bench --scale`, 10k nodes + 100k edges, indexed edge `MATCH` with id-pushdown): p50 = 2.67 µs.
 - **Offline-first.** Reads return stale-with-flag on miss. Writes queue locally to the persisted mutation log and sync when connectivity returns.
 - **Hostile-device-aware.** Per-user + per-device auth. Motif compares opaque tokens; host owns the auth flow. Storage layer keeps encryption-at-rest as a future option.
 - **Capability-aware.** A `[capability]` config section reports deterministic facts about the host (RAM, cores, storage, arch, GPU); the controller uses this to choose between `edge-is-tiny` (motif as cache) and `edge-is-free` (motif executes locally) strategies. Motif itself has no opinion on policy.
 
-## Build
+## Install (from crates.io)
+
+```toml
+[dependencies]
+motif-core = "0.0.4"  # the engine library
+# Optional, target-specific:
+motif-wasm = "0.0.4"  # wasm32 bindings (host JS shim)
+motif-ffi  = "0.0.4"  # C ABI cdylib (iOS / Android consumers)
+```
+
+Pre-v0.1 stability disclaimer: minor bumps (v0.0.x → v0.0.x+1) may break the public API. Pin exact versions if your build matters. v0.1.0 is the API-freeze gate.
+
+## Build from source
 
 ```bash
 cargo build --release --target wasm32-unknown-unknown -p motif-wasm
 cargo run -p motif-cli -- bench --nodes 1000 --lookups 5000
+cargo run -p motif-cli -- bench --scale --nodes 10000 --edges 100000
 cargo run -p motif-cli -- print-config motif.toml.example
 ```
 

@@ -200,6 +200,28 @@ pass can grep its way to the source.
 > the latest schema's label set, closing v0.0.2 exit criterion 5
 > with a clean error path for new inserts under the latest schema
 > rather than silent corruption.
+>
+> **v0.0.4-alpha.5 retired (audit pass — closed):**
+> motif-ffi `unsafe` audit (first pass against the v0.0.4 surface;
+> all checklist items passed; results recorded inline in
+> `crates/motif-ffi/src/lib.rs` module doc); `[debt]` retired (audit
+> re-runs against the v0.0.5+ engine surface when pointer-taking
+> `extern "C"` functions land). The pre-PR `simplify` +
+> `security-review` skill protocol established in v0.0.3-alpha.5
+> continued across every v0.0.4 alpha PR — no review-time findings
+> needed code fixes post-merge.
+>
+> **v0.0.4-alpha.5 knowingly accepted (audit pass — explicit accept,
+> deferred):** Cross-engine perf benchmark vs upstream Kuzu — `motif
+> bench --scale` shipped in alpha.4 produces motif's numbers (10k
+> nodes + 100k edges + indexed edge MATCH: p50 = 2.67µs in-memory);
+> the Kuzu side is documented as an offline measurement protocol in
+> `KUZU_DIVERGENCE.md` for the maintainer to run locally. CI-side
+> harness (prebuilt-Kuzu-binary + matrix across simulated device
+> profiles) is a v0.0.5+ infrastructure item, not a v0.0.4 publish
+> blocker. `EdgeConfig.foreshadow_eager = false` +
+> `schema_cache = "fetch"` carry forward to v0.0.5 with the
+> "Hostile-device-aware" milestone's bridge work.
 
 ---
 
@@ -759,25 +781,19 @@ pass can grep its way to the source.
   inherits the workspace forbid; the audit pass should confirm both
   invariants — workspace forbid in place + motif-ffi the only relaxer.
   *Source:* `Cargo.toml:21-22`; `crates/motif-ffi/Cargo.toml` (`[lints]`).
-- `[debt]` **`motif-ffi` `unsafe` surface needs a dedicated audit
-  before the v0.0.4-alpha.5 crates.io publish.** v0.0.3-alpha.4
-  shipped the crate with a single symbol (`motif_version`, no
-  pointer parameters, no actual `unsafe` in the lib body). v0.0.4-
-  alpha.5 grows the engine surface (`motif_open` / `motif_query` /
-  `motif_close`) — pointer-taking `extern "C"` functions with real
-  `unsafe` blocks and SAFETY invariants. Once that's drafted, run a
-  focused security pass before flipping `publish = false` → `true`:
-  - Every `unsafe` block carries a SAFETY comment that names the
-    caller invariants it relies on.
-  - Pointer parameters validate non-null / alignment before deref.
-  - Handle-passing conventions (engine pointer ownership / lifetime)
-    are documented in the function rustdoc and exercised by tests.
-  - No `unsafe impl Send/Sync` without an audited justification.
-  - C ABI types don't leak Rust enum discriminants where the host
-    can't see the layout.
-  The crates.io publish gates on this audit completing cleanly.
-  *Source:* `crates/motif-ffi/src/lib.rs`; `MOTIF.md` v0.0.4 + alpha.5
-  milestones.
+- ~~`[debt]` `motif-ffi` `unsafe` surface needs a dedicated audit
+  before the v0.0.4-alpha.5 crates.io publish~~ — **first pass
+  completed in v0.0.4-alpha.5** against the v0.0.4 surface (one
+  symbol, `motif_version`; one `unsafe` block in a unit test calling
+  `CStr::from_ptr`). Every checklist item passed: SAFETY-comment ✓,
+  no pointer params ✓ (N/A), no `unsafe impl Send/Sync` ✓, C ABI is
+  `*const c_char` only ✓, workspace `unsafe_code = "forbid"` lint
+  intact on every other crate ✓. The audit re-runs against the
+  v0.0.5+ engine surface (`motif_open` / `motif_query` /
+  `motif_close`) before its publish — the checklist lives in
+  `crates/motif-ffi/src/lib.rs` module doc.
+  *Source:* `crates/motif-ffi/src/lib.rs` (v0.0.4-alpha.5 audit-pass
+  results section).
 
 ## C++ baseline (`cpp-reference/`)
 
@@ -805,9 +821,17 @@ The v0.0.1 audit pass happened in PR #1; findings 1, 2, 4, 5, 6, 7 from
 that review were accepted as deferrable and tagged in this file as the
 v0.0.2 backlog. The v0.0.2 audit pass was v0.0.2-alpha.5: findings 4,
 6, 7 closed by code fix; finding 5 explicitly accepted. The v0.0.3
-audit pass is v0.0.3-alpha.5 (this PR): wasm capability probe closed
-by code fix; cold-start budget / wasm-bindgen-test CI / native cdylib
-full-link CI explicitly deferred to v0.0.4 alongside the crates.io
-publish (when first consumers anchor the budget); `EdgeConfig` knobs
-+ `hoverphone` carry forward to their committed destinations per
-the long-run strategy. Same cadence applies between v0.0.3 and v0.0.4.
+audit pass was v0.0.3-alpha.5: wasm capability probe closed by code
+fix; cold-start budget / wasm-bindgen-test CI / native cdylib
+full-link CI explicitly deferred. The v0.0.4 audit pass is
+v0.0.4-alpha.5 (this PR): motif-ffi `unsafe`-surface audit completed
+(first pass against the v0.0.4 single-symbol surface — all
+checklist items passed; the audit re-runs on the v0.0.5+ engine
+surface); cross-engine Kuzu benchmark deferred to an offline
+maintainer-run protocol documented in `KUZU_DIVERGENCE.md`;
+`EdgeConfig.foreshadow_eager = false` + `schema_cache = "fetch"`
+carry forward to v0.0.5 alongside the bridge work that motivates
+them. The pre-PR `simplify` + `security-review` skill protocol
+introduced in v0.0.3-alpha.5 caught every actionable concern across
+alphas 1–4; CodeRabbit + manual review found nothing additional.
+Same cadence applies between v0.0.4 and v0.0.5.

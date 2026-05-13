@@ -7,6 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
+readme = "../../README.md"
+keywords = ["graph", "database", "embedded", "cypher", "wasm"]
+categories = ["database-implementations", "embedded", "wasm"]
 
 [features]
 default = ["in-memory-controller"]

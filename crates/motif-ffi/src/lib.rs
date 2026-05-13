@@ -1,4 +1,4 @@
-//! Motif C ABI shim — v0.0.3-alpha.4.
+//! Motif C ABI shim.
 //!
 //! Tiny `extern "C"` surface for hosts that consume motif as a
 //! `cdylib`: primarily Swift on iOS (via `static let` C-string imports
@@ -8,13 +8,13 @@
 //!
 //! ## Scope
 //!
-//! v0.0.3-alpha.4 ships the build pipeline and a single symbol
+//! v0.0.4 ships the build pipeline and a single symbol
 //! ([`motif_version`]) — enough to prove the cdylib link path works
 //! end-to-end and that motif-core compiles cleanly for
 //! `aarch64-apple-ios` + `aarch64-linux-android`. The engine surface
-//! (`motif_open` / `motif_query` / `motif_close`) lands in v0.0.4
-//! alongside the first crates.io publish, when the public API is
-//! stable enough to commit to a C ABI shape.
+//! (`motif_open` / `motif_query` / `motif_close`) lands in v0.0.5+
+//! when the public API is stable enough to commit to a C ABI shape;
+//! the audit checklist below stays in place to gate that expansion.
 //!
 //! ## Why a separate crate vs. cdylib on motif-core directly?
 //!
@@ -32,17 +32,11 @@
 //! v0.1.0 milestone freezes the API surface (per `MOTIF.md` long-run
 //! strategy).
 //!
-//! ## Pre-publish `unsafe` audit (BEFORE v0.0.4-alpha.5 crates.io)
+//! ## Unsafe audit
 //!
 //! `motif-ffi` is the workspace's **only** `unsafe_code = "forbid"`
-//! relaxer. v0.0.3-alpha.4 shipped with no real `unsafe` blocks
-//! (just `#[no_mangle]` + `extern "C"` on a static-string return);
-//! v0.0.4-alpha.5 grows the engine surface (`motif_open` /
-//! `motif_query` / `motif_close`) with pointer-taking FFI and real
-//! `unsafe` blocks.
-//!
-//! Before flipping `publish = false` → `true`, every `unsafe` block
-//! must satisfy:
+//! relaxer. The audit checklist gates every new `unsafe` block before
+//! a crates.io publish:
 //!
 //! - **SAFETY comment** above the block naming the caller invariants
 //!   it relies on.
@@ -50,15 +44,35 @@
 //!   any deref. Errors return a documented error code rather than UB.
 //! - **Handle ownership / lifetime documented** in the function's
 //!   rustdoc, and exercised by at least one test (round-trip:
-//!   `motif_open` → `motif_query` → `motif_close`).
+//!   `motif_open` → `motif_query` → `motif_close` when those land).
 //! - **No `unsafe impl Send/Sync`** without an audited justification
 //!   that names the synchronization primitive enforcing the bound.
 //! - **C ABI types are stable**: no Rust enum discriminants leak
 //!   where the host can't see the layout (use opaque pointers /
 //!   `#[repr(C)]` with explicit discriminants).
 //!
-//! The checklist also lives in `LIMITATIONS.md`; the v0.0.4-alpha.5
-//! audit pass walks it explicitly before the publish step.
+//! ### v0.0.4-alpha.5 audit pass (BEFORE first crates.io publish)
+//!
+//! Surface audited: one symbol (`motif_version`), one `unsafe` block
+//! (a unit test calling `CStr::from_ptr`). Results:
+//!
+//! - `motif_version` body uses no `unsafe`. The `concat!(...).as_ptr()
+//!   as *const c_char` chain is a primitive-pointer cast (1-byte
+//!   alignment in both directions), not a deref. ✓
+//! - The test's `unsafe { CStr::from_ptr(motif_version()) }` carries
+//!   a SAFETY comment naming the static-memory + NUL-termination
+//!   invariants. ✓
+//! - No pointer parameters in the v0.0.4 surface — pointer-validation
+//!   checklist item is N/A. ✓
+//! - No `unsafe impl Send/Sync` anywhere in the crate. ✓
+//! - C ABI surface is `*const c_char` only — no Rust enums leak. ✓
+//! - Workspace `unsafe_code = "forbid"` lint verified intact on
+//!   motif-core / motif-wasm / motif-cli; motif-ffi is the only
+//!   relaxer. ✓
+//!
+//! The v0.0.5+ engine surface (`motif_open` / `motif_query` /
+//! `motif_close`) re-runs this audit against the expanded surface
+//! before the next crates.io publish.
 
 // motif-ffi is the dedicated FFI seam: by construction it needs
 // `unsafe` for any signature that takes pointers (and for invoking
