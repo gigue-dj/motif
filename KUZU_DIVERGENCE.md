@@ -1,10 +1,10 @@
-# Motif → Kuzu divergence
+# morceau-db → Kuzu divergence
 
-This document catalogues the meaningful deltas between Motif (the
+This document catalogues the meaningful deltas between morceau-db (the
 greenfield Rust port at the top of this repo) and upstream Kuzu (the
 frozen C++ reference at `cpp-reference/`). Contributors arriving with
 Kuzu expectations can use this as a quick orientation: most of what
-Kuzu does, Motif intentionally does not.
+Kuzu does, morceau-db intentionally does not.
 
 > **Cadence.** Refresh once per minor (between v0.0.x → v0.0.x+1) as
 > part of the audit pass already in `LIMITATIONS.md`. Per-alpha is too
@@ -12,12 +12,12 @@ Kuzu does, Motif intentionally does not.
 >
 > **Scope of comparison.** Kuzu at the alpha.1 freeze point
 > (`cpp-reference/`, derived from the Kuzu MIT release at the time of
-> the Motif fork). We don't track ongoing upstream changes — Kuzu was
+> the morceau-db fork). We don't track ongoing upstream changes — Kuzu was
 > archived after our fork landed.
 
 ## Why we diverged at all
 
-Motif is a **mobile-first follower**. Kuzu is an **embedded
+morceau-db is a **mobile-first follower**. Kuzu is an **embedded
 analytical graph engine**. The two end up in very different places
 on the design dial because the constraints are different:
 
@@ -29,7 +29,7 @@ on the design dial because the constraints are different:
   embed the same artifact via a wasm runtime.
 
 Where Kuzu optimised for "lots of data, complex queries on a
-laptop / server," Motif optimises for "small working set, simple
+laptop / server," morceau-db optimises for "small working set, simple
 queries on a phone, controller-corrected on the wire."
 
 ### Scale target (gigue-driven)
@@ -44,14 +44,14 @@ name). Per-device working set:
 
 That asymmetry has design consequences. Edge label + property
 indexes graduate to North-Star tier in the v0.0.4 milestone (see
-`MOTIF.md`); O(N) edge scans don't survive the upper bound. The
+`MORCEAU.md`); O(N) edge scans don't survive the upper bound. The
 indexes row below reflects current state vs target state.
 
 ## Subsystem-by-subsystem
 
 ### Storage
 
-| Kuzu | Motif | Why |
+| Kuzu | morceau-db | Why |
 |---|---|---|
 | Columnar disk-based storage with buffer manager, segments, vectorised page layout. Multiple files (catalog + data + WAL + shadow). | Single-file append-only Mutation log; 16-byte header, length-prefixed bincode records. In-memory `id → offset` index rebuilt on open. | Mobile budget: <2 MB binary, <100 KB working set is realistic. Buffer manager + segments are overkill. The single file is also a friendly artifact for sandboxed app-data directories on iOS / Android. |
 | Bespoke on-disk format with index hashing for `UINT128`, dictionary compression, etc. | bincode (serde) with a pinned config. No compression. | We ship far less data and far less variety. |
@@ -59,7 +59,7 @@ indexes row below reflects current state vs target state.
 
 ### Query engine
 
-| Kuzu | Motif | Why |
+| Kuzu | morceau-db | Why |
 |---|---|---|
 | Full openCypher: planner → optimiser → vectorised executor with morsel-driven parallelism and factorised intermediate state. | Hand-rolled lexer + recursive-descent parser + AST-walking interpreter. No planner, no optimiser. The AST is the plan. | Most local-cache reads are by-id lookups. Constant-time fast path (`WHERE id(n) = $x`) covers the hot path through v0.0.3. v0.0.4 grows label + property indexes (nodes AND edges) — see the indexes row — so non-id MATCH stays sub-linear at the gigue B2B target (100k–1M+ edges). |
 | Multi-statement queries, `WITH` clause, `OPTIONAL MATCH`, list comprehensions, subqueries, `CALL`, aggregation, `ORDER BY`, grouping. | Single-statement subset: `CREATE`, `MATCH` + `WHERE` + `RETURN` + `LIMIT`, `MERGE` (no-op-on-hit), `MATCH ... DELETE`. | Targeted at "bind a parameter, fetch the row." Anything else is the controller's problem. |
@@ -68,56 +68,56 @@ indexes row below reflects current state vs target state.
 
 ### Concurrency
 
-| Kuzu | Motif | Why |
+| Kuzu | morceau-db | Why |
 |---|---|---|
 | ACID transactions with MVCC; multiple concurrent readers + writers. | Single-writer engine (`&mut self` for both reads and writes). No transactions. | Mobile clients don't have multiple writers. Removing MVCC removes a lot of code. |
-| Multi-core query parallelism. | Sync core; one thread per controller worker; that's it. | Sync core is intentional (MOTIF.md decision 12). Parallel query execution is a server-side concern. |
+| Multi-core query parallelism. | Sync core; one thread per controller worker; that's it. | Sync core is intentional (MORCEAU.md decision 12). Parallel query execution is a server-side concern. |
 
 ### Indexes
 
-| Kuzu | Motif | Why |
+| Kuzu | morceau-db | Why |
 |---|---|---|
 | Hash index, vector index, full-text search, sparse-row CSR adjacency for joins. | **Through v0.0.3:** one id index (`HashMap<String, IndexEntry>`) shared across nodes and edges. **v0.0.4-alpha.1:** node and edge namespaces split into independent maps; `edge_by_label` index + `iter_edges_by_label` API land. **Edge property index** is alpha.2 work (alongside the Cypher edge surface that drives it). **Node label / property indexes** stay deferred (10k node ceiling per the gigue B2B target keeps O(N_nodes) cheap). Vector / FTS / specialised joins remain explicit `[scope]` cuts. | The shared map was fine for the v0.0.2 by-id hot path; the gigue B2B target (100k–1M+ edges) makes O(N) edge scans non-negotiable, so the v0.0.4 milestone graduates real edge indexes alongside the Cypher surface growth. Vector / FTS stay bridge concerns — controller bridges that need them route the relevant queries upstream. |
 
 ### Type system
 
-| Kuzu | Motif | Why |
+| Kuzu | morceau-db | Why |
 |---|---|---|
 | `BOOL`, `INT8…INT64`, `UINT8…UINT128`, `SERIAL`, `FLOAT`, `DOUBLE`, `STRING`, `BLOB`, `DATE`, `TIMESTAMP`, `INTERVAL`, `UUID`, `STRUCT`, `MAP`, `LIST`, `UNION`, `NODE`, `REL`, `RECURSIVE_REL`. | `Null`, `Bool`, `I64`, `F64`, `String`, `Timestamp` (epoch ms; alpha.3), `List` (heterogeneous; alpha.3). Seven variants shipped; `Blob` / `Map` / `Struct` discriminants reserved for v0.0.5+. | Property types follow query needs. Codec discriminant layout pencilled in `value.rs` so v0.0.5+ additions don't re-encode shipped data. We don't preempt typed lists, required-property markers, or the larger int / unsigned families until a caller asks. |
 
 ### Catalog / schema
 
-| Kuzu | Motif | Why |
+| Kuzu | morceau-db | Why |
 |---|---|---|
-| Engine owns the catalog: `CREATE NODE TABLE`, `CREATE REL TABLE`, schema migrations, type validation at insert. | Schema is **controller-owned**, pushed via `MutationOp::SchemaApply` over the same channel as mutations. Engine validates labels (since v0.0.2-alpha.3) and property types (since v0.0.4-alpha.3); permissive on undeclared properties; `Value::Null` accepted for any declared type. No incremental migration — newer schema versions wholly replace older ones. | Motif is a follower; the upstream is the source of truth for shape. Required-property markers and typed lists wait for a caller need. |
+| Engine owns the catalog: `CREATE NODE TABLE`, `CREATE REL TABLE`, schema migrations, type validation at insert. | Schema is **controller-owned**, pushed via `MutationOp::SchemaApply` over the same channel as mutations. Engine validates labels (since v0.0.2-alpha.3) and property types (since v0.0.4-alpha.3); permissive on undeclared properties; `Value::Null` accepted for any declared type. No incremental migration — newer schema versions wholly replace older ones. | morceau-db is a follower; the upstream is the source of truth for shape. Required-property markers and typed lists wait for a caller need. |
 
 ### Bindings / distribution
 
-| Kuzu | Motif | Why |
+| Kuzu | morceau-db | Why |
 |---|---|---|
-| Java, Python, Node.js, Rust, C, C++, WebAssembly bindings. Pre-compiled binaries for Linux / macOS / Windows × x86_64 / arm64. | Rust core; wasm-bindgen for `wasm32-unknown-unknown`. Native targets (iOS / Android) penciled for v0.0.3+. | Single shipping artifact per MOTIF.md decision 2. |
-| Extension framework with 16+ bundled extensions (`fts`, `vector`, `azure`, `delta`, `duckdb`, `httpfs`, `iceberg`, `json`, `llm`, `neo4j`, `postgres`, `sqlite`, `unity_catalog`). | No extensions. Controller bridges (`motif-*-bridge`) are optional separate crates. | Controller-agnostic posture (decision 18). Motif-core never imports a network DB client. |
+| Java, Python, Node.js, Rust, C, C++, WebAssembly bindings. Pre-compiled binaries for Linux / macOS / Windows × x86_64 / arm64. | Rust core; wasm-bindgen for `wasm32-unknown-unknown`. Native targets (iOS / Android) penciled for v0.0.3+. | Single shipping artifact per MORCEAU.md decision 2. |
+| Extension framework with 16+ bundled extensions (`fts`, `vector`, `azure`, `delta`, `duckdb`, `httpfs`, `iceberg`, `json`, `llm`, `neo4j`, `postgres`, `sqlite`, `unity_catalog`). | No extensions. Controller bridges (`morceau-*-bridge`) are optional separate crates. | Controller-agnostic posture (decision 18). morceau-core never imports a network DB client. |
 
 ### Controller / sync
 
 This is the section without a Kuzu counterpart. Kuzu is authoritative
-where Motif is a follower:
+where morceau-db is a follower:
 
 - `Controller` trait + worker-per-controller scaffolding (native
   `std::thread`, wasm `wasm-bindgen-futures`).
 - `Mutation { local_seq, actor, foreshadow, op }` is the on-disk
   record AND the wire-shaped message.
 - Server-wins resolution with `foreshadow: bool` for in-flight tracking.
-- `metadata-as-data` Cypher namespace (`n._motif.foreshadow`,
-  `n._motif.schema.version`).
+- `metadata-as-data` Cypher namespace (`n._morceau.foreshadow`,
+  `n._morceau.schema.version`).
 - `replay_unconfirmed` for catching a fresh worker up after a crash.
 
-These live in `crates/motif-core/src/sync/` and the engine's commit
+These live in `crates/morceau-core/src/sync/` and the engine's commit
 path; the upstream Kuzu had nothing to port here.
 
 ## Performance comparison
 
-### Motif numbers (`motif bench --scale`)
+### morceau-db numbers (`morceau bench --scale`)
 
 | Workload | p50 | p95 | p99 | mean |
 |---|---|---|---|---|
@@ -155,8 +155,8 @@ To run the comparison locally:
    - Node table `Person(id STRING PRIMARY KEY)` with 10k rows
      (`n0`..`n9999`).
    - Rel table `KNOWS FROM Person TO Person` with 10k edges of
-     the form `n_i -KNOWS-> n_(i+17) % 10000` (motif's
-     `motif bench --scale` uses `from = i % nodes`,
+     the form `n_i -KNOWS-> n_(i+17) % 10000` (morceau-db's
+     `morceau bench --scale` uses `from = i % nodes`,
      `to = (i + 17) % nodes` for the `KNOWS` label specifically;
      ignore the other 9 labels for the cross-engine measurement).
 3. Run the equivalent query 1000× and report p50 / p95 / p99 / mean:
@@ -172,7 +172,7 @@ To run the comparison locally:
 | 10k nodes, 10k `KNOWS` edges, in-memory, label+id `MATCH` | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
 
 We expect the comparison to be unflattering on Kuzu's side at this
-N (motif has no buffer manager / no MVCC / no planner overhead) and
+N (morceau-db has no buffer manager / no MVCC / no planner overhead) and
 unflattering on ours at large N (no vectorised executor, no morsel
 parallelism). The crossover point is the actual interesting datum
 — add a 1M-edge row to the table once v0.0.6's scale work lands.
@@ -186,7 +186,7 @@ parallelism). The crossover point is the actual interesting datum
   Cypher is well-understood.
 - "Property graph" data model: nodes + edges, both with arbitrary
   property bags.
-- "Embedded, no server process" design philosophy — even though Motif
+- "Embedded, no server process" design philosophy — even though morceau-db
   takes that further (no buffer manager, no parallelism) it's the
   same posture.
 
@@ -197,11 +197,11 @@ These are decisions, not omissions:
 - Multi-writer / MVCC / ACID transactions — single-writer is the
   right shape for the follower role.
 - A bundled extension framework — bridges are separate crates,
-  always (MOTIF.md decision 18).
-- Vector / FTS indexes inside motif-core — those are bridge concerns.
+  always (MORCEAU.md decision 18).
+- Vector / FTS indexes inside morceau-core — those are bridge concerns.
 - The full Cypher surface — we ship the subset queries actually need
   on the edge.
 
 If a future contributor wants any of the above, the answer is: build
-it as a separate `motif-*-bridge` or `motif-*-hub` crate, or fork the
-engine. Motif's core stays small.
+it as a separate `morceau-*-bridge` or `morceau-*-hub` crate, or fork the
+engine. morceau-db's core stays small.

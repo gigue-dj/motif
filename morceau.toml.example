@@ -1,0 +1,81 @@
+# morceau-db configuration. Host applications own this file and pass its path
+# to `Morceau::open()`. Schema is owned by the upstream controller and pushed
+# to morceau-db at runtime; nothing about the data shape lives here.
+#
+# All fields without a documented default are required. Defaults will be
+# introduced only when we have a concrete reason to.
+
+[identity]
+# Per-user + per-device identity. Both fields are mandatory: the controller
+# uses the pair for audit and conflict resolution. Treat the device as
+# potentially compromised — the user_id alone is not sufficient.
+user_id = "u_replace_me"
+device_id = "d_replace_me"
+
+[controller]
+# Where committed mutations are sent. v0.0.1 ships only `in-memory`.
+# Concrete controller transports are optional separate bridge crates
+# (e.g. `morceau-surreal-bridge`); their config lives outside this section.
+# Once a bridge is wired, set `kind = "external"` here and let the bridge
+# crate pick up its own configuration.
+kind = "in-memory"
+
+[storage]
+# Single-file local store. v0.0.2 persists the mutation log in this file
+# alongside graph records.
+path = "./morceau.db"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Below sections land in v0.0.2. They are documented here so reviewers
+# and host implementers can see the planned shape; v0.0.1 ignores them.
+# ─────────────────────────────────────────────────────────────────────────
+
+[capability]
+# Deterministic facts about the host hardware. morceau-db reports these to
+# the controller; controller (or host) decides what counts as "enough" for
+# any given workload. NO qualitative labels here ("medium", "sufficient",
+# ...) — just numbers and well-defined enums.
+#
+# v0.0.3-alpha.1: morceau-db probes its own resource access at open time
+# (cores via std::thread::available_parallelism, RAM via sysinfo,
+# storage via Storage::free_space, arch via cfg!). Every field below is
+# optional and acts as a per-field OVERRIDE — present here wins over
+# the probe. Reasons to override: the host knows morceau-db is constrained
+# below the kernel-visible numbers (cgroup quota, sandbox), or the
+# host wants to lie for testing. Otherwise leave fields absent and
+# morceau-db fills them.
+#
+# wasm32: native probes don't run; alpha.3 wires navigator.* probes
+# alongside the storage shim. Until then, hosts on wasm32 must declare
+# fields they care about.
+# ram_mb = 4096
+# cpu_cores = 4
+# storage_mb = 65536
+# arch = "aarch64"     # one of: "aarch64", "x86_64", "wasm32"
+# gpu_present = false
+
+[edge]
+# Edge strategy knobs. morceau-db itself does not pick a strategy — these
+# expose the levers so the host can configure for either "edge-is-tiny"
+# (cache + foreshadow buffer; controller does real compute) or
+# "edge-is-free" (morceau-db executes locally based on capability profile).
+#
+# foreshadow_eager:
+#   true  — apply mutations to the local store immediately, marked
+#           foreshadow=true; controller correction flips/evicts later.
+#           Matches edge-is-free.
+#   false — buffer mutations until controller confirms; reads return
+#           server state only. Matches edge-is-tiny.
+foreshadow_eager = true
+
+# retention_confirmed_secs:
+#   How long to keep mutation-log entries after the controller has
+#   confirmed them. Lower = smaller on-disk footprint; higher = better
+#   audit window for re-sync. Set to 0 to evict immediately on confirm.
+retention_confirmed_secs = 3600
+
+# schema_cache:
+#   "push"   — controller pushes schema; morceau-db caches the latest only.
+#   "fetch"  — morceau-db fetches schema lazily on first reference.
+#   v0.0.2 ships "push" only.
+schema_cache = "push"

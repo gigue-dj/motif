@@ -1,7 +1,7 @@
-# Motif — running limitations ledger
+# morceau-db — running limitations ledger
 
 This file is a **running ledger of every caveat we are knowingly building
-in**. It is an audit aid, not a spec — `MOTIF.md` is the spec. The ledger
+in**. It is an audit aid, not a spec — `MORCEAU.md` is the spec. The ledger
 exists so that the audit pass between releases (CodeRabbit + a manual
 sweep, performed for v0.0.1 in PR #1) has a single place to attack, and so
 anyone reading the codebase can tell at a glance which "TODO"-shaped
@@ -40,7 +40,7 @@ pass can grep its way to the source.
 >
 > **v0.0.2-alpha.3 added:** schema push (controller-pushed `Schema` via
 > `MutationOp::SchemaApply`); engine validates labels against the
-> current schema; `_motif.schema.version` resolves via the metadata-as-
+> current schema; `_morceau.schema.version` resolves via the metadata-as-
 > data Cypher namespace. Format version bumped to `3`. New scope items
 > for std::thread default + future Spawner trait, feature-flagged
 > InMemoryController, and unvalidated `controller.kind` (slated for
@@ -69,7 +69,7 @@ pass can grep its way to the source.
 > from-disk gap: `Engine::replay_unconfirmed()` walks the persisted log
 > and re-feeds foreshadow=true mutations to a freshly wired controller.
 > Bench harness gained `--backend memory|file` and `--with-controller`
-> flags (closes the `motif-cli bench` file-backed scope item).
+> flags (closes the `morceau-cli bench` file-backed scope item).
 >
 > **v0.0.2-alpha.5 knowingly accepted (audit pass — explicit accept,
 > deferred):** PR #1 finding 5 (unary minus) — trivial to add when the
@@ -90,7 +90,7 @@ pass can grep its way to the source.
 > **v0.0.3-alpha.1 added:** `tracing` (no-op default subscriber);
 > capability auto-discovery primary, TOML override per-field
 > (native probe via sysinfo / available_parallelism / fs2);
-> `motif bench --cold-start` harness; on-paper native target
+> `morceau bench --cold-start` harness; on-paper native target
 > decision (`cdylib`).
 >
 > **v0.0.3-alpha.2 added:** `Spawner` trait (native-only) + default
@@ -99,16 +99,16 @@ pass can grep its way to the source.
 > wasm-sleep `[gap]`.
 >
 > **v0.0.3-alpha.3 added:** wasm host-storage shim
-> (`motif_wasm::WasmHostStorage` + `MotifHostStorage` JS interface);
-> `Motif::open_with_host_storage` entry point; `Storage` trait
+> (`morceau_wasm::WasmHostStorage` + `MorceauHostStorage` JS interface);
+> `Morceau::open_with_host_storage` entry point; `Storage` trait
 > gains the `MaybeSend` marker so wasm impls holding `JsValue`
 > satisfy the trait. Closed the wasm-only-`MemoryStorage` `[gap]`.
 >
-> **v0.0.3-alpha.4 added:** `motif-ffi` crate (cdylib + rlib) with
-> the v0.0.3 minimum-viable C ABI shim (`motif_version`); CI matrix
+> **v0.0.3-alpha.4 added:** `morceau-ffi` crate (cdylib + rlib) with
+> the v0.0.3 minimum-viable C ABI shim (`morceau_version`); CI matrix
 > for `aarch64-apple-ios` + `aarch64-linux-android` via
 > `cargo check`. Workspace `unsafe_code = "forbid"` overridden
-> inside motif-ffi only.
+> inside morceau-ffi only.
 >
 > **v0.0.3-alpha.5 retired (audit pass — closed by code fix):**
 > wasm capability probe — `navigator.deviceMemory` (RAM,
@@ -163,8 +163,8 @@ pass can grep its way to the source.
 > Interpreter pushes `WHERE id(start) = $x` down into the start-node
 > lookup for path patterns (pre-alpha.4 this walked every node).
 > Cypher polish: `ORDER BY <expr> [ASC|DESC]`, `count(n)`,
-> `collect(n.prop)`. `motif bench --scale [--nodes N --edges M
-> --lookups L]` for motif's own numbers at the gigue B2B target.
+> `collect(n.prop)`. `morceau bench --scale [--nodes N --edges M
+> --lookups L]` for morceau-db's own numbers at the gigue B2B target.
 >
 > **v0.0.4-alpha.4 deferred (scope trims, all consistent with the
 > "ship measurable behaviour; don't preempt for a use case no
@@ -177,7 +177,7 @@ pass can grep its way to the source.
 >   real bridge needed for the round-trip.
 > - **Cross-engine perf benchmark vs upstream Kuzu.** Installing
 >   Kuzu in CI is alpha-sized work on its own; alpha.4 ships
->   `motif bench --scale` for motif's own numbers (10k nodes +
+>   `morceau bench --scale` for morceau-db's own numbers (10k nodes +
 >   100k edges + indexed-edge MATCH: p50 = 2.67µs in-memory),
 >   the alpha.5 audit pass picks up the Kuzu side-by-side once a
 >   real measurement harness is set up.
@@ -202,9 +202,9 @@ pass can grep its way to the source.
 > rather than silent corruption.
 >
 > **v0.0.4-alpha.5 retired (audit pass — closed):**
-> motif-ffi `unsafe` audit (first pass against the v0.0.4 surface;
+> morceau-ffi `unsafe` audit (first pass against the v0.0.4 surface;
 > all checklist items passed; results recorded inline in
-> `crates/motif-ffi/src/lib.rs` module doc); `[debt]` retired (audit
+> `crates/morceau-ffi/src/lib.rs` module doc); `[debt]` retired (audit
 > re-runs against the v0.0.5+ engine surface when pointer-taking
 > `extern "C"` functions land). The pre-PR `simplify` +
 > `security-review` skill protocol established in v0.0.3-alpha.5
@@ -212,8 +212,8 @@ pass can grep its way to the source.
 > needed code fixes post-merge.
 >
 > **v0.0.4-alpha.5 knowingly accepted (audit pass — explicit accept,
-> deferred):** Cross-engine perf benchmark vs upstream Kuzu — `motif
-> bench --scale` shipped in alpha.4 produces motif's numbers (10k
+> deferred):** Cross-engine perf benchmark vs upstream Kuzu — `morceau-db
+> bench --scale` shipped in alpha.4 produces morceau-db's numbers (10k
 > nodes + 100k edges + indexed edge MATCH: p50 = 2.67µs in-memory);
 > the Kuzu side is documented as an offline measurement protocol in
 > `KUZU_DIVERGENCE.md` for the maintainer to run locally. CI-side
@@ -231,131 +231,131 @@ pass can grep its way to the source.
   `wasm32-wasip1`, no native targets (`aarch64-apple-ios`,
   `aarch64-linux-android`), no browser-direct path. Host apps embed
   `wasmtime` or similar and pay the runtime tax.
-  *Source:* `MOTIF.md` decision 2; `rust-toolchain.toml`.
+  *Source:* `MORCEAU.md` decision 2; `rust-toolchain.toml`.
 - `[scope]` **WASM runtime perf tax** — host-runtime execution costs
   ~2–5× vs. native Rust. Acceptable for hosts that pick wasm; the
-  v0.0.3-alpha.4 native `cdylib` path (`motif-ffi` crate) gives
+  v0.0.3-alpha.4 native `cdylib` path (`morceau-ffi` crate) gives
   `aarch64-apple-ios` + `aarch64-linux-android` consumers a way to
   drop that tax.
-  *Source:* `MOTIF.md` decision 2; v0.0.3 milestone.
-- `[scope]` **Native cdylib targets via `motif-ffi` (`cdylib` chosen
-  over `uniffi`).** v0.0.3-alpha.4 lands a tiny `motif-ffi` crate
+  *Source:* `MORCEAU.md` decision 2; v0.0.3 milestone.
+- `[scope]` **Native cdylib targets via `morceau-ffi` (`cdylib` chosen
+  over `uniffi`).** v0.0.3-alpha.4 lands a tiny `morceau-ffi` crate
   (cdylib + rlib) that exposes a `extern "C"` surface — single
-  symbol shipped (`motif_version`), engine surface (`motif_open` /
-  `motif_query` / `motif_close`) lands in v0.0.4 alongside the
+  symbol shipped (`morceau_version`), engine surface (`morceau_open` /
+  `morceau_query` / `morceau_close`) lands in v0.0.4 alongside the
   crates.io publish. CI covers both `aarch64-apple-ios` +
   `aarch64-linux-android` via `cargo check` (full link needs Apple's
   clang or the Android NDK; deferred to alpha.5 audit pass and
   potentially a macOS CI runner). Workspace `unsafe_code = "forbid"`
-  is overridden inside `motif-ffi` only; every other crate stays
+  is overridden inside `morceau-ffi` only; every other crate stays
   forbid-unsafe.
-  *Source:* `crates/motif-ffi/`; `.github/workflows/rust.yml`
-  (`native-targets` job); `MOTIF.md` v0.0.3 milestone.
+  *Source:* `crates/morceau-ffi/`; `.github/workflows/rust.yml`
+  (`native-targets` job); `MORCEAU.md` v0.0.3 milestone.
 - `[scope]` **Internally usable only through v0.0.3** — all crates
   are `publish = false`. No crates.io, no semver guarantees.
   **First crates.io publish is v0.0.4** with a pre-v0.1 "fluid API;
   expect breakage" README note. v0.1.0 freezes the public surface
   and adds semver promises.
-  *Source:* `Cargo.toml`; `MOTIF.md` decision 14; v0.0.4 + v0.1.0
+  *Source:* `Cargo.toml`; `MORCEAU.md` decision 14; v0.0.4 + v0.1.0
   milestones.
 - `[scope]` **Dual MIT / Apache-2.0** — Rust convention; not yet
   uniform with `cpp-reference/` (which remains MIT only via the
   inherited Kuzu license).
-  *Source:* `LICENSE-MIT`, `LICENSE-APACHE`; `MOTIF.md` decision 15.
+  *Source:* `LICENSE-MIT`, `LICENSE-APACHE`; `MORCEAU.md` decision 15.
 
-## Configuration (`motif-core::config`)
+## Configuration (`morceau-core::config`)
 
 - `[scope]` **All TOML fields required.** No defaults yet — host apps
   must spell out `[identity]`, `[controller]`, `[storage]`. Defaults
   arrive only when a concrete reason demands one.
-  *Source:* `crates/motif-core/src/config.rs:22-26`.
+  *Source:* `crates/morceau-core/src/config.rs:22-26`.
 - `[scope]` **Identity fields are opaque strings.** `user_id` and
   `device_id` are not validated against any auth system; a real JWT /
   per-device-key flow is v0.0.2 work.
-  *Source:* `crates/motif-core/src/config.rs:31-39`;
-  `MOTIF.md` decision 4.
+  *Source:* `crates/morceau-core/src/config.rs:31-39`;
+  `MORCEAU.md` decision 4.
 - `[scope]` **`[capability]` reports deterministic facts only.** No
   qualitative labels ("medium", "sufficient") — just numbers and well-
-  defined enums. Motif reports facts; controller (or host) decides
+  defined enums. morceau-db reports facts; controller (or host) decides
   what counts as enough.
-  *Source:* `motif.toml.example`; `MOTIF.md` decision 20.
+  *Source:* `morceau.toml.example`; `MORCEAU.md` decision 20.
 - `[scope]` **`[capability]` probe is primary; TOML is per-field
   override.** v0.0.3-alpha.1 made the probe authoritative — at open
-  time motif probes the resources it can verify access to (cores via
+  time morceau-db probes the resources it can verify access to (cores via
   `std::thread::available_parallelism`, RAM via `sysinfo`, disk via
   `Storage::free_space`, arch via `cfg!`) and merges with the host's
   declaration: declared fields win, probe fills the rest. Reason: the
-  host's view of the device's resources isn't always motif's view —
+  host's view of the device's resources isn't always morceau-db's view —
   cgroup quotas, sandboxes, or shared multi-tenant hosts can put the
   two out of sync, and decisions made on inflated numbers fail
   downstream. Per-field override lets the host lie when it knows
   better (constraint testing, deliberate budgets) without forcing
   full declaration.
-  *Source:* `crates/motif-core/src/capability.rs`; `MOTIF.md` v0.0.3
+  *Source:* `crates/morceau-core/src/capability.rs`; `MORCEAU.md` v0.0.3
   milestone.
 - `[scope]` **`[edge]` knobs are first-class for both strategies.**
   `edge-is-tiny` (cache + foreshadow) and `edge-is-free` (local
-  execution) are both supported via configuration. Motif itself picks
+  execution) are both supported via configuration. morceau-db itself picks
   no strategy.
-  *Source:* `motif.toml.example`; `MOTIF.md` decisions 21.
+  *Source:* `morceau.toml.example`; `MORCEAU.md` decisions 21.
 - `[scope]` **`controller.kind` is an opaque string.** v0.0.2-alpha.2
-  dropped the `ControllerKind` enum so motif-core never enumerates
-  concrete bridges (per the OSS posture, MOTIF.md decision 18). The
+  dropped the `ControllerKind` enum so morceau-core never enumerates
+  concrete bridges (per the OSS posture, MORCEAU.md decision 18). The
   bridge crate (or the host) interprets the string; conventional
-  values are documented in `motif.toml.example`.
-  *Source:* `crates/motif-core/src/config.rs` (`ControllerConfig`).
+  values are documented in `morceau.toml.example`.
+  *Source:* `crates/morceau-core/src/config.rs` (`ControllerConfig`).
 - `[scope]` **`controller.kind` validation is opt-in via
   `Engine::with_named_controller`.** v0.0.2-alpha.5 closed the debt:
   hosts that want kind-checking call
   `Engine::with_named_controller(controller, kind)` instead of
-  `with_controller(controller)`, and motif returns
+  `with_controller(controller)`, and morceau-db returns
   `EngineError::ControllerKindMismatch { declared, wired }` if the
   config's `controller.kind` and the host's wired-kind string disagree.
   Plain `with_controller` remains available for hosts that don't want
   the check (or are testing against multiple controller stand-ins). The
-  `kind` string itself is still opaque — motif-core never enumerates
-  concrete bridges per MOTIF.md decision 18.
-  *Source:* `crates/motif-core/src/engine.rs`
+  `kind` string itself is still opaque — morceau-core never enumerates
+  concrete bridges per MORCEAU.md decision 18.
+  *Source:* `crates/morceau-core/src/engine.rs`
   (`with_named_controller`, `ControllerKindMismatch`).
 
-## Storage (`motif-core::storage`, `motif-core::record`)
+## Storage (`morceau-core::storage`, `morceau-core::record`)
 
 - `[scope]` **Greenfield format.** No on-disk compatibility with the
   C++ baseline at `cpp-reference/`. Format version is `1`; any change
   bumps the constant in `storage.rs` and forces re-bootstrap.
-  *Source:* `crates/motif-core/src/storage.rs:21-23`;
-  `MOTIF.md` decision 10.
+  *Source:* `crates/morceau-core/src/storage.rs:21-23`;
+  `MORCEAU.md` decision 10.
 - `[debt]` **No CRC on records.** Length-prefixed `bincode` only. Torn
   writes surface as decode errors during recovery; in-place corruption
   in the middle of the log is detected only when read. CRC + improved
   crash-safety semantics land in v0.0.5 ("Hostile-device-aware")
   alongside encryption-at-rest — both are durability concerns and
   share the storage-layer touch.
-  *Source:* `crates/motif-core/src/record.rs:1-15`;
-  `MOTIF.md` v0.0.5 milestone.
+  *Source:* `crates/morceau-core/src/record.rs:1-15`;
+  `MORCEAU.md` v0.0.5 milestone.
 - `[debt]` **Recovery silently truncates a torn tail.** No diagnostic
   is surfaced beyond log replay continuing past the truncation. Should
   emit a `tracing` event when `tracing` is added in v0.0.2.
-  *Source:* `crates/motif-core/src/engine.rs:113`,
-  `crates/motif-core/src/storage.rs:211-222`.
+  *Source:* `crates/morceau-core/src/engine.rs:113`,
+  `crates/morceau-core/src/storage.rs:211-222`.
 - `[debt]` **`fsync` per write.** `FileStorage::append` fsyncs every
   record. Correct, but expensive on flash. Batched / opt-in fsync is a
   v0.0.2 perf knob.
-  *Source:* `crates/motif-core/src/storage.rs:170-188`.
-- `[scope]` **Storage trait is sync.** No async I/O in `motif-core`
+  *Source:* `crates/morceau-core/src/storage.rs:170-188`.
+- `[scope]` **Storage trait is sync.** No async I/O in `morceau-core`
   per the "sync core" decision. Async at the edges only.
-  *Source:* `crates/motif-core/src/storage.rs:52-71`;
-  `MOTIF.md` decision 12.
+  *Source:* `crates/morceau-core/src/storage.rs:52-71`;
+  `MORCEAU.md` decision 12.
 - ~~`[gap]` `FileStorage` fails at open on `wasm32`~~ —
   **closed in v0.0.3-alpha.3** (with the obvious caveat that
   `FileStorage` itself still doesn't work on wasm; what's closed is
   the gap of "you can't persist on wasm at all"). The wasm host-
-  storage shim — `motif_wasm::WasmHostStorage` + the
-  `MotifHostStorage` JS interface — gives hosts a seam to plug in
+  storage shim — `morceau_wasm::WasmHostStorage` + the
+  `MorceauHostStorage` JS interface — gives hosts a seam to plug in
   OPFS, the iOS app sandbox, the Android internal-storage directory,
   or whatever else they have access to. Concrete reference impls are
   host territory (per the v0.0.3 plan).
-  *Source:* `crates/motif-wasm/src/host_storage.rs`.
+  *Source:* `crates/morceau-wasm/src/host_storage.rs`.
 - ~~`[scope]` Single-namespace ID index~~ — **closed in
   v0.0.4-alpha.1.** `Engine` now holds `node_index` and `edge_index`
   as independent `HashMap<String, IndexEntry>` maps. A node and an
@@ -363,8 +363,8 @@ pass can grep its way to the source.
   (`get_node` / `get_edge`) keep the namespaces unambiguous. The
   split changes index shape only — record cardinality is unchanged
   (N nodes + M edges still = N + M entries).
-  *Source:* `crates/motif-core/src/engine.rs`;
-  `crates/motif-core/tests/namespace_split.rs`.
+  *Source:* `crates/morceau-core/src/engine.rs`;
+  `crates/morceau-core/tests/namespace_split.rs`.
 - ~~`[debt]` No referential integrity on node delete~~ —
   **partially closed in v0.0.4-alpha.3.** `DETACH DELETE` (Cypher) +
   `Engine::delete_node_with_cascade` (programmatic) remove a node
@@ -374,8 +374,8 @@ pass can grep its way to the source.
   Walking `iter_edges` to find incident edges is O(N_total_edges) —
   documented below as a `[perf]` debt that the v0.0.4-alpha.4
   `(from, label)` adjacency index closes.
-  *Source:* `crates/motif-core/src/engine.rs` (`delete_node_with_cascade`);
-  `crates/motif-core/tests/detach_delete.rs`.
+  *Source:* `crates/morceau-core/src/engine.rs` (`delete_node_with_cascade`);
+  `crates/morceau-core/tests/detach_delete.rs`.
 - `[perf]` **`iter_nodes` / `iter_edges` are O(N) reads.**
   v0.0.4-alpha.1 added `iter_edges_by_label(&str)` backed by the new
   `edge_by_label` index — `MATCH ()-[r:LABEL]->()` (lands in alpha.2)
@@ -384,24 +384,24 @@ pass can grep its way to the source.
   namespace; edge property index lands in alpha.2 alongside the
   Cypher edge surface that drives it; node label / property indexes
   stay deferred (10k node ceiling makes O(N_nodes) cheap).
-  *Source:* `crates/motif-core/src/engine.rs` (`iter_edges_by_label`);
-  `MOTIF.md` v0.0.4 milestone.
+  *Source:* `crates/morceau-core/src/engine.rs` (`iter_edges_by_label`);
+  `MORCEAU.md` v0.0.4 milestone.
 - `[scope]` **Property values: 7 variants shipped, more reserved.**
   `Null`, `Bool`, `I64`, `F64`, `String`, `Timestamp` (alpha.3),
   `List` (alpha.3). v0.0.5+ reservations: `Blob` (encryption-at-rest
   payloads), `Map` (keyed bag), `Struct` (named-field record).
-  Discriminant layout pencilled in `crates/motif-core/src/value.rs`
+  Discriminant layout pencilled in `crates/morceau-core/src/value.rs`
   module-doc + fingerprinted by a unit test so a reorder breaks
   loudly. Adding any variant past index 6 bumps `FORMAT_VERSION`.
   Required-property markers and typed lists
   (`PropertyType::List(Box<PropertyType>)`) wait for a caller need.
-  *Source:* `crates/motif-core/src/value.rs`,
-  `crates/motif-core/src/schema.rs` (`PropertyType`).
+  *Source:* `crates/morceau-core/src/value.rs`,
+  `crates/morceau-core/src/schema.rs` (`PropertyType`).
 - ~~`[perf]` `delete_node_with_cascade` walks `iter_edges`~~ —
   **closed in v0.0.4-alpha.4.** New `iter_edges_incident_to(node_id)`
   unions the `edges_by_from` + `edges_by_to` adjacency-index buckets;
   cascade is now O(degree) per call.
-  *Source:* `crates/motif-core/src/engine.rs`
+  *Source:* `crates/morceau-core/src/engine.rs`
   (`delete_node_with_cascade`, `iter_edges_incident_to`).
 - ~~`[debt]` `Storage::truncate` does not enforce
   `new_len >= HEADER_LEN`~~ — **closed in v0.0.2-alpha.5.** Both
@@ -410,27 +410,27 @@ pass can grep its way to the source.
   caller would otherwise wipe the magic. Two new unit tests cover the
   guard.
 
-## Query (`motif-core::query`)
+## Query (`morceau-core::query`)
 
 - `[scope]` **Hand-rolled lexer + parser + interpreter** (not a parser
   combinator framework). No planner, no optimizer — the AST is the
   plan. Reassessed once exit criteria are met.
-  *Source:* `crates/motif-core/src/query/mod.rs:1-40`;
-  `MOTIF.md` decision 11.
+  *Source:* `crates/morceau-core/src/query/mod.rs:1-40`;
+  `MORCEAU.md` decision 11.
 - `[scope]` **Cypher only.** No SurrealQL or other-dialect translators
-  inside Motif. Translators (if anyone wants them) live in optional
+  inside morceau-db. Translators (if anyone wants them) live in optional
   bridge / hub crates.
-  *Source:* `MOTIF.md` decision 11.
+  *Source:* `MORCEAU.md` decision 11.
 - `[scope]` **Metadata is queryable as data.** v0.0.2 exposes
   foreshadow flags, override history, and the capability profile via
-  Cypher tables (`MATCH (n) WHERE n._motif.foreshadow = true RETURN n`)
+  Cypher tables (`MATCH (n) WHERE n._morceau.foreshadow = true RETURN n`)
   rather than a separate state-inspection API. No parallel vocabulary.
-  *Source:* `MOTIF.md` decision 19.
+  *Source:* `MORCEAU.md` decision 19.
 - `[scope]` **Single bound variable per statement.** No
   `MATCH (a)-[r]->(b)`, no multi-pattern, no `WITH`, no
   `OPTIONAL MATCH`.
-  *Source:* `crates/motif-core/src/query/mod.rs:30-44`,
-  `crates/motif-core/src/query/ast.rs:5-7`.
+  *Source:* `crates/morceau-core/src/query/mod.rs:30-44`,
+  `crates/morceau-core/src/query/ast.rs:5-7`.
 - ~~`[gap]` Edges aren't queryable from Cypher~~ — **closed in
   v0.0.4-alpha.2.** `MATCH (a)-[r]->(b)` parses + interprets; label
   predicates (`-[r:LABEL]->`) hit the `edge_by_label` index;
@@ -440,8 +440,8 @@ pass can grep its way to the source.
   `MATCH p1, p2` work (shared variables unify on id). `RETURN` of an
   edge variable produces a `ResultCell::Edge`; `RETURN r.prop`
   resolves the edge's properties.
-  *Source:* `crates/motif-core/src/query/{ast,parser,interpreter}.rs`;
-  `crates/motif-core/tests/edge_match.rs`.
+  *Source:* `crates/morceau-core/src/query/{ast,parser,interpreter}.rs`;
+  `crates/morceau-core/tests/edge_match.rs`.
 - `[debt]` **`collect(<variable>)` returns the id as a string for
   Node / Edge bindings.** v0.0.4-alpha.4 ships `collect(n)` on a
   node / edge variable by producing `Value::String(id)` because
@@ -451,7 +451,7 @@ pass can grep its way to the source.
   `FORMAT_VERSION` (per `value.rs` codec-layout pencil) and reshapes
   every consumer that pattern-matches on `Value`. Lands when a
   caller asks for the typed form.
-  *Source:* `crates/motif-core/src/query/interpreter.rs` (`collect_one`).
+  *Source:* `crates/morceau-core/src/query/interpreter.rs` (`collect_one`).
 - `[perf]` **Inline edge-property predicates are bucket-scan, not
   indexed.** v0.0.4-alpha.2 evaluates `-[r:LABEL {prop: v}]->` by
   walking the `edge_by_label` bucket for `LABEL` and filtering each
@@ -461,8 +461,8 @@ pass can grep its way to the source.
   if a benchmark shows a single label bucket dominates the workload
   — preempting it now would cost ~24 B × N_edges × avg-props in RAM
   for a use case nobody has yet measured.
-  *Source:* `crates/motif-core/src/query/interpreter.rs`
-  (`path_candidates`, `edge_pattern_matches`); `MOTIF.md` v0.0.4
+  *Source:* `crates/morceau-core/src/query/interpreter.rs`
+  (`path_candidates`, `edge_pattern_matches`); `MORCEAU.md` v0.0.4
   milestone.
 - ~~`[perf]` `path_candidates` does a linear `edge.from` scan per
   row per hop~~ — **closed in v0.0.4-alpha.4.** New `edges_by_from`
@@ -472,11 +472,11 @@ pass can grep its way to the source.
   of materializing-then-filtering. Also pushed the `WHERE id(start) = $x`
   predicate down into the start-node lookup — pre-alpha.4 this
   walked every node in the namespace as a start candidate. Combined
-  effect on the alpha.4 `motif bench --scale` (10k nodes + 100k
+  effect on the alpha.4 `morceau bench --scale` (10k nodes + 100k
   edges + indexed edge MATCH): **p50 31ms → 2.67µs (~10,000×)**.
-  *Source:* `crates/motif-core/src/engine.rs` (`iter_edges_from`,
+  *Source:* `crates/morceau-core/src/engine.rs` (`iter_edges_from`,
   `edges_by_from`, `edges_by_to`);
-  `crates/motif-core/src/query/interpreter.rs` (`path_candidates`).
+  `crates/morceau-core/src/query/interpreter.rs` (`path_candidates`).
 - `[perf]` **`find_match_rows` builds the full cartesian product
   before applying WHERE / LIMIT.** Multi-pattern `MATCH` with no
   shared variables produces |p1| × |p2| × … rows in memory before
@@ -486,36 +486,36 @@ pass can grep its way to the source.
   alpha.3+ work — for now, hosts that issue unbounded multi-pattern
   joins on large datasets are encouraged to add `id()` predicates
   or label filters that narrow each pattern's candidate set first.
-  *Source:* `crates/motif-core/src/query/interpreter.rs`
+  *Source:* `crates/morceau-core/src/query/interpreter.rs`
   (`find_match_rows`).
 - `[scope]` **`MERGE` is no-op-on-hit, not full upsert.** Existing
   nodes are not updated; only missing nodes are inserted. Real upsert
   is post-v0.0.1 once the controller decides what "update" means.
-  *Source:* `crates/motif-core/src/query/mod.rs:38-40`,
-  `crates/motif-core/src/query/interpreter.rs:89-112`.
+  *Source:* `crates/morceau-core/src/query/mod.rs:38-40`,
+  `crates/morceau-core/src/query/interpreter.rs:89-112`.
 - `[scope]` **`CREATE` / `MERGE` require an explicit `id` string
   property.** Engine does not assign synthetic ids.
-  *Source:* `crates/motif-core/src/query/mod.rs:36-37`.
+  *Source:* `crates/morceau-core/src/query/mod.rs:36-37`.
 - `[scope]` **Only built-in function is `id(n)`.** No `count`,
   `collect`, `coalesce`, etc.
-  *Source:* `crates/motif-core/src/query/mod.rs:41`.
+  *Source:* `crates/morceau-core/src/query/mod.rs:41`.
 - `[scope]` **No multi-statement / transactions.** Each `Engine::query`
   call is one statement, auto-committed.
-  *Source:* `crates/motif-core/src/engine.rs:1-15`.
+  *Source:* `crates/morceau-core/src/engine.rs:1-15`.
 - `[debt]` **Three-valued logic is implemented but lightly tested.**
   `Null` propagation through `AND`, `OR`, comparisons, and `NOT`
   matches Cypher semantics in code but only has incidental coverage
   in `query_smoke.rs`. Add explicit tests in the audit pass.
-  *Source:* `crates/motif-core/src/query/interpreter.rs:284-345`.
+  *Source:* `crates/morceau-core/src/query/interpreter.rs:284-345`.
 - `[debt]` **Lexer escapes are minimal.** Only `\\ \" \' \n \t`. No
   Unicode escapes, no `\r`, no octal/hex. Fine for English-language
   test data; revisit before any locale-bearing host ships on top.
-  *Source:* `crates/motif-core/src/query/lexer.rs:5-7`.
+  *Source:* `crates/morceau-core/src/query/lexer.rs:5-7`.
 - `[debt]` **`DELETE` orphans edges silently.** Documented at the
   engine level; the parser does not surface a warning. The audit
   pass should decide whether the interpreter rejects the query when
   edges reference the doomed node.
-  *Source:* `crates/motif-core/src/query/interpreter.rs:143-160`.
+  *Source:* `crates/morceau-core/src/query/interpreter.rs:143-160`.
 - ~~`[perf]` `extract_id_predicate` only matches a top-level
   `id(n) = X`~~ — **closed in v0.0.2-alpha.5.** A recursive
   `extract_id_in_expr` helper walks `AND` chains so
@@ -526,40 +526,40 @@ pass can grep its way to the source.
   v0.0.2-alpha.5.*** `-10` parses as the literal `Integer(-10)`;
   `-n.balance` does not parse. No caller needs arithmetic on properties
   yet; trivial to add when the expression layer grows in v0.0.3+.
-  *Source:* `crates/motif-core/src/query/lexer.rs` (`scan_number`
+  *Source:* `crates/morceau-core/src/query/lexer.rs` (`scan_number`
   entry path). Logged from PR #1 review (finding 5).
 
-## Sync layer (`motif-core::sync`)
+## Sync layer (`morceau-core::sync`)
 
-- `[scope]` **Bridges architecture: motif-core never bundles a
+- `[scope]` **Bridges architecture: morceau-core never bundles a
   controller transport.** The `Controller` trait (lands in v0.0.2) is
-  the only seam. Concrete transports — `motif-surreal-bridge`,
-  `motif-supabase-bridge`, etc. — ship as optional separate crates
-  under `bridges/` (or separate repos). `cargo tree -p motif-core`
+  the only seam. Concrete transports — `morceau-surreal-bridge`,
+  `morceau-supabase-bridge`, etc. — ship as optional separate crates
+  under `bridges/` (or separate repos). `cargo tree -p morceau-core`
   must show no network deps. Likewise host-side event/MCP layers live
-  in `hubs/` (`motif-hub` etc.).
-  *Source:* `MOTIF.md` decisions 3, 18.
+  in `hubs/` (`morceau-hub` etc.).
+  *Source:* `MORCEAU.md` decisions 3, 18.
 - `[scope]` **Foreshadow semantics.** v0.0.2-alpha.1 added a
   `foreshadow: bool` flag to `Mutation` (default `true` on every fresh
   commit). Server-wins resolution will flip the flag or evict the
   record once the controller flow lands in alpha.2.
-  *Source:* `crates/motif-core/src/sync/mutation.rs`;
-  `crates/motif-core/src/engine.rs`; `MOTIF.md` decision 5.
+  *Source:* `crates/morceau-core/src/sync/mutation.rs`;
+  `crates/morceau-core/src/engine.rs`; `MORCEAU.md` decision 5.
 - `[gap]` **No concrete bridge crates.** v0.0.2-alpha.2 lands the
   abstract `Controller` trait + thread-per-controller worker (native
   `std::thread` + `mpsc`, wasm `wasm-bindgen-futures::spawn_local` +
   `futures-channel::mpsc::unbounded`); only `InMemoryController` ships
-  in motif-core. Concrete transports (e.g. `motif-surreal-bridge`)
-  live outside motif-core per MOTIF.md decision 18.
-  *Source:* `crates/motif-core/src/sync/controller.rs`;
-  `crates/motif-core/src/sync/worker.rs`.
+  in morceau-core. Concrete transports (e.g. `morceau-surreal-bridge`)
+  live outside morceau-core per MORCEAU.md decision 18.
+  *Source:* `crates/morceau-core/src/sync/controller.rs`;
+  `crates/morceau-core/src/sync/worker.rs`.
 - `[debt]` **WASM size jumped 308 KB in alpha.2. *Knowingly accepted in
   v0.0.2-alpha.5.*** wasm-bindgen-futures + futures-channel +
   futures-util + js-sys add ~310 KB after `wasm-opt -Oz` (713 KB total
   vs alpha.1's 405 KB; 35% of the 2 MiB budget). Plenty of headroom; a
   hand-rolled microtask trampoline (drops futures-util) is v0.0.3+
   work, motivated when a real wasm bridge actually pushes the budget.
-  *Source:* `crates/motif-core/src/sync/worker.rs` (wasm impl);
+  *Source:* `crates/morceau-core/src/sync/worker.rs` (wasm impl);
   workspace deps.
 - `[scope]` **In-process reconnect: retry-with-backoff on every apply.**
   v0.0.2-alpha.4 grew the worker into a state machine: `connect`
@@ -569,7 +569,7 @@ pass can grep its way to the source.
   (mutation stays foreshadow=true on disk). Mutations queued during
   the retry window stack up in the channel and drain after recovery —
   ordering preserved.
-  *Source:* `crates/motif-core/src/sync/worker.rs`; `MOTIF.md`
+  *Source:* `crates/morceau-core/src/sync/worker.rs`; `MORCEAU.md`
   decision 12.
 - ~~`[gap]` No replay-from-disk after worker crash~~ — **closed in
   v0.0.2-alpha.5.** `Engine::replay_unconfirmed()` walks the persisted
@@ -577,32 +577,32 @@ pass can grep its way to the source.
   through the wired `MutationLog`. No-op when no controller is wired.
   Tests cover the basic case, ordered insert+delete replay, and the
   no-controller no-op. *Source:*
-  `crates/motif-core/src/engine.rs` (`replay_unconfirmed`);
-  `crates/motif-core/tests/audit_pass.rs`.
+  `crates/morceau-core/src/engine.rs` (`replay_unconfirmed`);
+  `crates/morceau-core/tests/audit_pass.rs`.
 - ~~`[gap]` wasm worker doesn't actually sleep on backoff~~
   — **closed in v0.0.3-alpha.2.** `wasm_sleep` now awaits
   `gloo_timers::future::TimeoutFuture::new(ms)` (a `setTimeout`-
   backed Future) instead of `future::ready`. Wasm retry backoff is
   real now; bundle hit was modest (well within the 2 MiB budget).
-  *Source:* `crates/motif-core/src/sync/worker.rs` (`wasm_sleep`).
+  *Source:* `crates/morceau-core/src/sync/worker.rs` (`wasm_sleep`).
 - `[gap]` **`EdgeConfig.foreshadow_eager = false` not yet enforced.
   *Knowingly accepted in v0.0.2-alpha.5.*** Parses the field but always
   behaves as if `true` (apply locally, mark foreshadow=true). No caller
   needs buffer-mode yet; lands when one does. Field stays on
-  `EdgeConfig` for forward-compatibility so existing `motif.toml`
+  `EdgeConfig` for forward-compatibility so existing `morceau.toml`
   files don't have to change.
-  *Source:* `crates/motif-core/src/config.rs` (`EdgeConfig`).
+  *Source:* `crates/morceau-core/src/config.rs` (`EdgeConfig`).
 - `[gap]` **`EdgeConfig.retention_confirmed_secs` not yet enforced.
   *Knowingly accepted in v0.0.2-alpha.5.*** Log compaction of
   confirmed mutations is v0.0.3+ work — needs a confirm-acknowledgement
   protocol with the controller that we haven't designed yet. Field is
   parsed and stored for forward-compatibility.
-  *Source:* `crates/motif-core/src/config.rs` (`EdgeConfig`).
+  *Source:* `crates/morceau-core/src/config.rs` (`EdgeConfig`).
 - `[gap]` **`EdgeConfig.schema_cache = "fetch"` not implemented.
   *Knowingly accepted in v0.0.2-alpha.5.*** Only `"push"` (controller
-  pushes; motif caches the latest) works. Lazy-fetch is post-v0.0.2;
+  pushes; morceau-db caches the latest) works. Lazy-fetch is post-v0.0.2;
   no caller needs it yet.
-  *Source:* `crates/motif-core/src/config.rs` (`EdgeConfig`).
+  *Source:* `crates/morceau-core/src/config.rs` (`EdgeConfig`).
 - `[scope]` **`hoverphone` test profile deferred to v0.0.3.
   *Knowingly accepted in v0.0.2-alpha.5.*** v0.0.2-alpha.4 stood up
   `default` and `potato` (the latter via a `ThrottledStorage` wrapper
@@ -610,7 +610,7 @@ pass can grep its way to the source.
   over-fast / unusual scheduling) needs an interleaved-test runner —
   more invasive than a sleep wrapper — and lands in v0.0.3+.
   v0.0.2 exit criterion 11 carries forward into v0.0.3.
-  *Source:* `crates/motif-core/tests/profiles.rs`; `MOTIF.md`
+  *Source:* `crates/morceau-core/tests/profiles.rs`; `MORCEAU.md`
   decision 22.
 - ~~`[gap]` `CapabilityConfig` auto-discovery deferred to v0.0.3+~~
   — **closed across v0.0.3-alpha.1 + v0.0.3-alpha.5.** Native probe
@@ -622,7 +622,7 @@ pass can grep its way to the source.
   on all evergreen browsers + Node + Deno + Bun). Both targets
   share the same resolve semantics — declared TOML fields override
   probe per-field.
-  *Source:* `crates/motif-core/src/capability.rs`.
+  *Source:* `crates/morceau-core/src/capability.rs`.
 - `[scope]` **`Spawner` trait is native-only; wasm has no equivalent
   seam.** v0.0.3-alpha.2 added [`crate::sync::Spawner`] +
   [`crate::sync::StdThreadSpawner`] (default) +
@@ -632,17 +632,17 @@ pass can grep its way to the source.
   host's wasm runtime *is* the spawner, and overriding `spawn_local`
   would mean swapping the microtask queue for something else, which
   isn't a real use case. **Do not introduce target-specific runtime
-  assumptions in motif-core** — contributors adding a tokio reactor
+  assumptions in morceau-core** — contributors adding a tokio reactor
   or similar would break this composability.
-  *Source:* `crates/motif-core/src/sync/spawner.rs`; `MOTIF.md`
+  *Source:* `crates/morceau-core/src/sync/spawner.rs`; `MORCEAU.md`
   decision 12.
 - `[scope]` **`InMemoryController` is feature-flagged (default-on).**
   Gated behind the `in-memory-controller` Cargo feature. Production
-  builds wiring a real `motif-*-bridge` controller can drop it via
+  builds wiring a real `morceau-*-bridge` controller can drop it via
   `default-features = false`. Tests, the dev CLI, and hosts that don't
   need controller integration keep the default.
-  *Source:* `crates/motif-core/Cargo.toml` (`[features]`);
-  `crates/motif-core/src/sync/controller.rs`.
+  *Source:* `crates/morceau-core/Cargo.toml` (`[features]`);
+  `crates/morceau-core/src/sync/controller.rs`.
 - `[debt]` **Tee fires after the storage append but before the index
   publishes for inserts.** A panic between those two steps would leave
   a record on disk that subsequent recovery picks up, with the
@@ -650,7 +650,7 @@ pass can grep its way to the source.
   reader observe a write the controller doesn't know about, so the
   current order is intentional. Document and lock in with a panic-
   safety test in the next audit pass.
-  *Source:* `crates/motif-core/src/engine.rs` (`commit`).
+  *Source:* `crates/morceau-core/src/engine.rs` (`commit`).
 - ~~`[debt]` `MutationLog::record` uses `.expect("poisoned")` on the
   mutex~~ — **closed in v0.0.2-alpha.5.** All locks now go through a
   shared `lock_recover()` helper that calls
@@ -660,57 +660,57 @@ pass can grep its way to the source.
 - `[gap]` **No provisional / CRDT shadow layer.** Server-wins is the
   decision; the local-temp-override mechanism is a v0.0.2 design
   item.
-  *Source:* `MOTIF.md` decision 5; open question 1.
+  *Source:* `MORCEAU.md` decision 5; open question 1.
 
-## Bindings (`motif-wasm`, `motif-cli`)
+## Bindings (`morceau-wasm`, `morceau-cli`)
 
-- `[scope]` **`Motif::open` on wasm uses `MemoryStorage` by default;
-  hosts opt in to persistence via `Motif::open_with_host_storage`.**
-  v0.0.3-alpha.3 added the host-supplied path. `Motif::open` stays
+- `[scope]` **`Morceau::open` on wasm uses `MemoryStorage` by default;
+  hosts opt in to persistence via `Morceau::open_with_host_storage`.**
+  v0.0.3-alpha.3 added the host-supplied path. `Morceau::open` stays
   in-memory (matches the working-cache shape; no surprise persistence
   for hosts that don't ask). For real persistence across page loads
-  / app restarts, the host implements the `MotifHostStorage` JS
+  / app restarts, the host implements the `MorceauHostStorage` JS
   interface (`append` / `readAt` / `len` / `truncate` / optional
   `freeSpace`) against OPFS, app sandbox, RN bridge, or whatever
-  else, and passes it to `Motif::open_with_host_storage(toml,
+  else, and passes it to `Morceau::open_with_host_storage(toml,
   storage)`. The `storage.path` field of the TOML config is ignored
   on both wasm paths — the host owns the medium.
-  *Source:* `crates/motif-wasm/src/lib.rs`,
-  `crates/motif-wasm/src/host_storage.rs`.
+  *Source:* `crates/morceau-wasm/src/lib.rs`,
+  `crates/morceau-wasm/src/host_storage.rs`.
 - `[scope]` **Wasm params + result marshalled as JSON strings.** No
   `serde-wasm-bindgen` dependency; host wraps in `JSON.stringify` /
   `JSON.parse`. Acceptable through v0.0.2 (one allocation per call);
   binary marshalling lands in v0.0.3 ("Run on a real device") if the
   cold-start measurement harness shows it matters — otherwise pushed
   later.
-  *Source:* `crates/motif-wasm/src/lib.rs` (`query`, `parse_params`).
+  *Source:* `crates/morceau-wasm/src/lib.rs` (`query`, `parse_params`).
 - `[debt]` **Wasm `params_json` rejects nested objects / arrays.**
   Only scalar params (`null`, `bool`, integers, floats, strings).
   Lists / structs of values land when the engine grows them.
-  *Source:* `crates/motif-wasm/src/lib.rs:107-112`.
+  *Source:* `crates/morceau-wasm/src/lib.rs:107-112`.
 - `[debt]` **Wasm `mutation_count` is a buffered-only counter.** It
   reports `MutationLog::buffered_len` — fine while no client is wired
   on the wasm path, but if a real client is connected later the
   counter will under-report. Add an explicit per-instance counter in
   the audit pass.
-  *Source:* `crates/motif-wasm/src/lib.rs` (`mutation_count`).
-- ~~`[scope]` `motif-cli bench` measures in-memory storage on
-  native~~ — **closed in v0.0.2-alpha.5.** `motif bench` now accepts
+  *Source:* `crates/morceau-wasm/src/lib.rs` (`mutation_count`).
+- ~~`[scope]` `morceau-cli bench` measures in-memory storage on
+  native~~ — **closed in v0.0.2-alpha.5.** `morceau bench` now accepts
   `--backend memory|file` and `--with-controller` flags; the
   file-backed path exercises `FileStorage` (fsync per write) and the
   controller-wired path measures the tee + worker channel. Smoke run:
   file-backed + with-controller, 1k nodes, 1k lookups → p50 17.67 µs
   (well within the 50 ms exit criterion).
-  *Source:* `crates/motif-cli/src/main.rs` (`run_bench`).
-- `[scope]` **Cold-start measurement is `motif bench --cold-start`.**
+  *Source:* `crates/morceau-cli/src/main.rs` (`run_bench`).
+- `[scope]` **Cold-start measurement is `morceau bench --cold-start`.**
   v0.0.3-alpha.1 added the harness. Per-iteration: fresh tempdir,
   optional untimed seed, drop-and-reopen, time `Engine::open`. Reports
   p50/p95/p99/mean + the resolved capability profile from the last
   open. Smoke run (file backend, 1k seed, 30 iters): p50 = 1.26 ms.
   No formal cold-start budget yet — set in v0.0.3-alpha.5 audit pass
   once we have iOS / Android numbers to anchor against.
-  *Source:* `crates/motif-cli/src/main.rs` (`run_cold_start`);
-  `MOTIF.md` v0.0.3 milestone.
+  *Source:* `crates/morceau-cli/src/main.rs` (`run_cold_start`);
+  `MORCEAU.md` v0.0.3 milestone.
 
 ## Operations / observability
 
@@ -721,29 +721,29 @@ pass can grep its way to the source.
   `hoverphone` injects artificial speed / unusual timing. Keeps the
   system honest against both edge-is-tiny hardware and edge-is-free
   acceleration.
-  *Source:* `MOTIF.md` decision 22; harness lands in v0.0.2-alpha.4.
-- `[scope]` **`tracing` only (no `tracing-subscriber` in motif-core).**
+  *Source:* `MORCEAU.md` decision 22; harness lands in v0.0.2-alpha.4.
+- `[scope]` **`tracing` only (no `tracing-subscriber` in morceau-core).**
   v0.0.3-alpha.1 added the `tracing` crate with instrumentation on
   `Engine::open_with`, the controller worker's connect / apply / retry
   paths, and the resolved capability log. **No subscriber is
-  initialized in motif-core** — events are no-ops until the host
+  initialized in morceau-core** — events are no-ops until the host
   wires its own (`tracing-subscriber` on native, `tracing-wasm` on
   wasm). Counters / metrics still aren't shipped.
-  *Source:* `crates/motif-core/src/engine.rs`,
-  `crates/motif-core/src/sync/worker.rs`; `MOTIF.md` v0.0.3 milestone.
+  *Source:* `crates/morceau-core/src/engine.rs`,
+  `crates/morceau-core/src/sync/worker.rs`; `MORCEAU.md` v0.0.3 milestone.
 - `[scope]` **No connection pooling / multi-database.** One `Engine`
   per file, single writer, single reader (the engine takes
   `&mut self` for both). Multi-tenant evaluation lands in v0.0.6
   ("Scale and operate"); the architectural answer may be a host-side
   multiplexer rather than growing `Engine` itself.
-  *Source:* `crates/motif-core/src/engine.rs:1-15`;
-  `MOTIF.md` v0.0.6 milestone.
+  *Source:* `crates/morceau-core/src/engine.rs:1-15`;
+  `MORCEAU.md` v0.0.6 milestone.
 - `[scope]` **No backup / restore / migration.** The 4-byte
   format-version field lives in the file header but the engine
   rejects any version other than the current one. Migration design
   lands in v0.0.6 alongside the rest of the operability work.
-  *Source:* `crates/motif-core/src/storage.rs:21-23,156-163`;
-  `MOTIF.md` v0.0.6 milestone.
+  *Source:* `crates/morceau-core/src/storage.rs:21-23,156-163`;
+  `MORCEAU.md` v0.0.6 milestone.
 
 ## Security
 
@@ -752,47 +752,47 @@ pass can grep its way to the source.
   assumptions. Encryption-at-rest design + impl lands in v0.0.5
   ("Hostile-device-aware") alongside CRC and the controller crypto
   handshake.
-  *Source:* `MOTIF.md` decision 13; v0.0.5 milestone.
-- `[scope]` **Motif compares opaque tokens, doesn't validate them.**
-  Per MOTIF.md decision 4 (refined for v0.0.2), Motif takes opaque
+  *Source:* `MORCEAU.md` decision 13; v0.0.5 milestone.
+- `[scope]` **morceau-db compares opaque tokens, doesn't validate them.**
+  Per MORCEAU.md decision 4 (refined for v0.0.2), morceau-db takes opaque
   tokens from the host and opaque keys from the controller and checks
-  they match — no JWT validation chain inside motif-core. Real auth
+  they match — no JWT validation chain inside morceau-core. Real auth
   flow ownership is host (token issuance) + controller (key issuance);
-  motif is the comparison point. v0.0.5 documents and tests both
+  morceau-db is the comparison point. v0.0.5 documents and tests both
   flows end-to-end with a spec controller.
-  *Source:* `crates/motif-core/src/sync/mutation.rs:7-15`;
-  `MOTIF.md` decision 4; v0.0.5 milestone.
+  *Source:* `crates/morceau-core/src/sync/mutation.rs:7-15`;
+  `MORCEAU.md` decision 4; v0.0.5 milestone.
 - `[gap]` **No controller crypto-suite handshake.** Bridges currently
   deliver `Mutation`s with no declaration of how they were
-  transmitted. Motif imposes nothing through v0.0.4. v0.0.5 adds a
+  transmitted. morceau-db imposes nothing through v0.0.4. v0.0.5 adds a
   `[security]` TOML section (`require_authenticated_channel`,
   `min_aead`, `pq_required`, suite allow-list); bridges advertise
-  their suite at `Controller::connect`; motif validates declared-vs-
+  their suite at `Controller::connect`; morceau-db validates declared-vs-
   policy and surfaces `ControllerSecurityError` on mismatch. PQ-
   forward (Signal-PQXDH-style fail-visible scanner) is plumbing in
   v0.0.5; PQ implementation itself is stretch. Opt-out is named
   `Engine::dangerously_*` — no quiet escape hatches.
-  *Source:* `MOTIF.md` v0.0.5 milestone.
+  *Source:* `MORCEAU.md` v0.0.5 milestone.
 - `[scope]` **`unsafe_code = "forbid"`** at the workspace level, with
-  one explicit exception: `motif-ffi` (the C ABI shim crate added in
+  one explicit exception: `morceau-ffi` (the C ABI shim crate added in
   v0.0.3-alpha.4) overrides to `unsafe_code = "allow"` because pointer-
   taking `extern "C"` signatures and `CStr::from_ptr` etc. unavoidably
-  need `unsafe`. Every other crate (motif-core, motif-wasm, motif-cli)
+  need `unsafe`. Every other crate (morceau-core, morceau-wasm, morceau-cli)
   inherits the workspace forbid; the audit pass should confirm both
-  invariants — workspace forbid in place + motif-ffi the only relaxer.
-  *Source:* `Cargo.toml:21-22`; `crates/motif-ffi/Cargo.toml` (`[lints]`).
-- ~~`[debt]` `motif-ffi` `unsafe` surface needs a dedicated audit
+  invariants — workspace forbid in place + morceau-ffi the only relaxer.
+  *Source:* `Cargo.toml:21-22`; `crates/morceau-ffi/Cargo.toml` (`[lints]`).
+- ~~`[debt]` `morceau-ffi` `unsafe` surface needs a dedicated audit
   before the v0.0.4-alpha.5 crates.io publish~~ — **first pass
   completed in v0.0.4-alpha.5** against the v0.0.4 surface (one
-  symbol, `motif_version`; one `unsafe` block in a unit test calling
+  symbol, `morceau_version`; one `unsafe` block in a unit test calling
   `CStr::from_ptr`). Every checklist item passed: SAFETY-comment ✓,
   no pointer params ✓ (N/A), no `unsafe impl Send/Sync` ✓, C ABI is
   `*const c_char` only ✓, workspace `unsafe_code = "forbid"` lint
   intact on every other crate ✓. The audit re-runs against the
-  v0.0.5+ engine surface (`motif_open` / `motif_query` /
-  `motif_close`) before its publish — the checklist lives in
-  `crates/motif-ffi/src/lib.rs` module doc.
-  *Source:* `crates/motif-ffi/src/lib.rs` (v0.0.4-alpha.5 audit-pass
+  v0.0.5+ engine surface (`morceau_open` / `morceau_query` /
+  `morceau_close`) before its publish — the checklist lives in
+  `crates/morceau-ffi/src/lib.rs` module doc.
+  *Source:* `crates/morceau-ffi/src/lib.rs` (v0.0.4-alpha.5 audit-pass
   results section).
 
 ## C++ baseline (`cpp-reference/`)
@@ -800,7 +800,7 @@ pass can grep its way to the source.
 - `[scope]` **Frozen.** Not built, not tested, not in CI. Acts as a
   behavioural reference for the Rust port. Will be archived (tag +
   optional separate repo) once v0.0.1 ships.
-  *Source:* `cpp-reference/`; `MOTIF.md` milestone table.
+  *Source:* `cpp-reference/`; `MORCEAU.md` milestone table.
 
 ---
 
@@ -824,7 +824,7 @@ v0.0.2 backlog. The v0.0.2 audit pass was v0.0.2-alpha.5: findings 4,
 audit pass was v0.0.3-alpha.5: wasm capability probe closed by code
 fix; cold-start budget / wasm-bindgen-test CI / native cdylib
 full-link CI explicitly deferred. The v0.0.4 audit pass is
-v0.0.4-alpha.5 (this PR): motif-ffi `unsafe`-surface audit completed
+v0.0.4-alpha.5 (this PR): morceau-ffi `unsafe`-surface audit completed
 (first pass against the v0.0.4 single-symbol surface — all
 checklist items passed; the audit re-runs on the v0.0.5+ engine
 surface); cross-engine Kuzu benchmark deferred to an offline
