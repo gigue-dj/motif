@@ -1,0 +1,4 @@
+# TODO: fill in (cargo deny check on every PR)
+name: cargo-deny
+on: workflow_dispatch
+jobs: {}
