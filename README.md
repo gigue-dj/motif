@@ -1,5 +1,11 @@
 # morceau-db
 
+[![crates.io](https://img.shields.io/crates/v/morceau-core.svg)](https://crates.io/crates/morceau-core)
+[![docs.rs](https://docs.rs/morceau-core/badge.svg)](https://docs.rs/morceau-core)
+[![CI](https://github.com/morceau-db/morceau-db/actions/workflows/rust.yml/badge.svg?branch=master)](https://github.com/morceau-db/morceau-db/actions/workflows/rust.yml)
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![MSRV](https://img.shields.io/badge/MSRV-1.78-orange.svg)](./Cargo.toml)
+
 **morceau-db** is a tiny, embedded follower graph store. It targets Swift and Rust application codebases on mobile and edge, with integrity outsourced to an upstream **controller** database via a generic trait — concrete controller bridges (SurrealDB, Supabase, ClickHouse, Nebula, ...) ship as optional separate crates.
 
 > **Status:** **v0.0.4 shipping — first crates.io publish.** Through v0.0.4 morceau-db ships the engine + hand-rolled Cypher subset (edge MATCH, multi-hop, multi-pattern, ORDER BY, count / collect, DETACH DELETE), persisted mutation log, abstract `Controller` trait + thread-per-controller worker with reconnect, schema push with property-type validation, ID-namespace split + edge label / adjacency indexes (gigue B2B target: 1k–10k nodes, 100k–1M+ edges; `morceau bench --scale` p50 = 2.67 µs), `[capability]` auto-discovery (native + wasm), wasm host-storage shim, native cdylib targets (iOS / Android via `morceau-ffi`), tracing-instrumented hot paths, and cold-start measurement.
